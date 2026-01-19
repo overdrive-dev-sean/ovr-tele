@@ -29,7 +29,7 @@ services:
       - victoria-metrics
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD__FILE=/etc/overdrive/secrets/grafana_admin_password
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/etc/ovr/secrets/grafana_admin_password
       - GF_SERVER_DOMAIN=localhost
       - GF_SERVER_ROOT_URL=http://localhost:13001/
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -78,7 +78,7 @@ services:
     volumes:
       - fleet_data:/data
       - fleet_reports:/data/reports
-      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - /etc/ovr/secrets:/etc/ovr/secrets:ro
     restart: unless-stopped
 
   map:
@@ -100,7 +100,7 @@ services:
     volumes:
       - ./Caddyfile.sandbox:/etc/caddy/Caddyfile:ro
       - ./caddy-entrypoint.sh:/entrypoint.sh:ro
-      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - /etc/ovr/secrets:/etc/ovr/secrets:ro
       - caddy_data:/data
       - caddy_config:/config
     environment:
@@ -111,6 +111,8 @@ services:
 
 volumes:
   vmdata:
+    external: true
+    name: ${CLOUD_VM_VOLUME_NAME:-vmdata}
   grafana:
   fleet_data:
   fleet_reports:
