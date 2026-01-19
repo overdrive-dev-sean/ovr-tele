@@ -1,0 +1,40 @@
+# Disabled by default: rename to .conf to enable.
+# SunSpec Modbus polling for Fronius Symo Advanced inverter.
+# Adjust IP/port, slave/unit ID, and the config style for your Telegraf build.
+
+# Option A: inputs.sunspec (preferred if available)
+# [[inputs.sunspec]]
+#   address = "192.168.100.50:502"
+#   unit_id = 1
+#   interval = "5s"
+#   timeout = "2s"
+#   # model_ids = [1, 101, 103, 120, 160]
+#   [inputs.sunspec.tags]
+#     device = "fronius"
+#     role = "inverter"
+#     node_id = "${NODE_ID}"
+#     deployment_id = "${DEPLOYMENT_ID}"
+
+# Option B: inputs.modbus with explicit SunSpec register map
+# [[inputs.modbus]]
+#   name = "sunspec"
+#   interval = "5s"
+#   controller = "tcp://192.168.100.50:502"
+#   slave_id = 1
+#   timeout = "2s"
+#   configuration_type = "request"
+#
+#   [[inputs.modbus.request]]
+#     slave_id = 1
+#     register = "holding"
+#     byte_order = "ABCD"
+#     measurement = "sunspec"
+#     fields = [
+#       # TODO: replace with SunSpec model register map for this inverter.
+#     ]
+#
+#     [inputs.modbus.request.tags]
+#       device = "fronius"
+#       role = "inverter"
+#       node_id = "${NODE_ID}"
+#       deployment_id = "${DEPLOYMENT_ID}"

@@ -1,0 +1,19 @@
+[Unit]
+Description=OVR first boot configuration
+Wants=network-online.target
+After=network.target network-online.target
+
+[Service]
+Type=oneshot
+Environment=NONINTERACTIVE=1
+TimeoutStartSec=0
+Restart=on-failure
+RestartSec=30
+ExecStartPre=/bin/sh -c 'mkdir -p /var/log && touch /var/log/ovr-firstboot.log && chmod 0640 /var/log/ovr-firstboot.log'
+ExecStart=/usr/local/sbin/ovr-firstboot
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

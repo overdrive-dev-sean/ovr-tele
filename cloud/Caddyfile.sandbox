@@ -1,0 +1,33 @@
+:18428 {
+  handle /api/v1/write* {
+    request_body {
+      max_size 50MB
+    }
+    basic_auth {
+      {$VM_WRITE_USER} {$VM_WRITE_PASS_HASH}
+    }
+    reverse_proxy victoria-metrics:8428
+  }
+
+  handle /write* {
+    request_body {
+      max_size 50MB
+    }
+    basic_auth {
+      {$VM_WRITE_USER} {$VM_WRITE_PASS_HASH}
+    }
+    reverse_proxy victoria-metrics:8428
+  }
+
+  respond 403
+}
+
+:18080 {
+  handle /api/* {
+    reverse_proxy api:8081
+  }
+
+  handle {
+    reverse_proxy map:8080
+  }
+}

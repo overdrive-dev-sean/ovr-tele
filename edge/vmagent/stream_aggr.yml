@@ -1,0 +1,4 @@
+- match: '{instance!~".*:9100"}'
+  interval: 10s
+  outputs:
+    - avg

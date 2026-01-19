@@ -1,0 +1,120 @@
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: victoria-metrics
+    command:
+      - "-storageDataPath=/storage"
+      - "-retentionPeriod=${VM_RETENTION:-400d}"
+      - "-httpListenAddr=:8428"
+    ports:
+      - "8428:8428"
+    volumes:
+      - /mnt/esata/victoria-metrics:/storage
+    restart: unless-stopped
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:latest
+    container_name: node-exporter
+    command:
+      - '--path.rootfs=/host'
+    network_mode: host
+    pid: host
+    restart: unless-stopped
+    volumes:
+      - '/:/host:ro,rslave'
+  vmagent:
+    image: victoriametrics/vmagent:latest
+    container_name: vmagent
+    depends_on:
+      - victoria-metrics
+    env_file:
+      - /etc/overdrive/site.env
+    entrypoint:
+      - /bin/sh
+      - /entrypoint.sh
+    ports:
+      - "8429:8429"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./vmagent/entrypoint.sh:/entrypoint.sh:ro
+      - /etc/overdrive/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro
+      - /etc/overdrive/targets.yml:/etc/overdrive/targets.yml:ro
+      - /etc/overdrive/stream_aggr.yml:/etc/overdrive/stream_aggr.yml:ro
+      - /etc/overdrive/remote_write_local_relabel.yml:/etc/overdrive/remote_write_local_relabel.yml:ro
+      - /etc/overdrive/remote_write_cloud_relabel.yml:/etc/overdrive/remote_write_cloud_relabel.yml:ro
+      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - vmagent_tmp:/tmp/vmagent
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    depends_on:
+      - victoria-metrics
+    env_file:
+      - /etc/overdrive/site.env
+    entrypoint:
+      - /bin/sh
+      - /entrypoint.sh
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/entrypoint.sh:/entrypoint.sh:ro
+      - grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    restart: unless-stopped
+  telegraf:
+    image: telegraf:latest
+    container_name: telegraf
+    depends_on:
+      - victoria-metrics
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - /etc/overdrive/site.env
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+      - ./telegraf/telegraf.d:/etc/telegraf/telegraf.d:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - telegraf
+      - --config
+      - /etc/telegraf/telegraf.conf
+      - --config-directory
+      - /etc/telegraf/telegraf.d
+      # Optional but recommended so edits to telegraf.d reload without restarting container:
+      - --watch-config
+      - poll
+
+  events:
+    build: ./services/events
+    container_name: events
+    depends_on:
+      - victoria-metrics
+    ports:
+      - "127.0.0.1:8088:8088"
+    volumes:
+      - event_data:/data
+      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+    env_file:
+      - /etc/overdrive/site.env
+    environment:
+      - DB_PATH=/data/events.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+
+  frontend:
+    build: ./services/frontend
+    container_name: frontend
+    depends_on:
+      - events
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  vmdata:
+  grafana:
+  vmagent_tmp:
+  event_data:

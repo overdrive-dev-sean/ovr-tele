@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+LOG_DIR="/data/overdrive/dbus2prom/log"
+mkdir -p "${LOG_DIR}"
+exec svlogd -tt "${LOG_DIR}"

@@ -1,0 +1,118 @@
+# Sandbox compose for running a "parallel" cloud stack on the same VPS.
+#
+# Key properties:
+# - Does NOT bind 80/443 (no public TLS); it runs an HTTP proxy on high ports.
+# - Maintains the same URL shape as production (map UI calls /api/... on same origin).
+# - Intended for temporary testing only.
+#
+# Ports (host -> container):
+# - Map UI + API proxy: 18080 -> caddy
+# - VictoriaMetrics remote-write (basic_auth): 18428 -> caddy
+# - Grafana (direct): 13001 -> grafana
+#
+# By default, ports bind to 127.0.0.1 (safe). To expose publicly, set SANDBOX_BIND=0.0.0.0 in cloud/.env.
+
+services:
+  victoria-metrics:
+    image: ${VM_IMAGE:?Set VM_IMAGE in cloud/.env (pin by tag or digest; no latest tag)}
+    command:
+      - "-storageDataPath=/storage"
+      - "-retentionPeriod=${VM_RETENTION:-365d}"
+      - "-httpListenAddr=:8428"
+    volumes:
+      - vmdata:/storage
+    restart: unless-stopped
+
+  grafana:
+    image: ${GRAFANA_IMAGE:?Set GRAFANA_IMAGE in cloud/.env (pin by tag or digest; no latest tag)}
+    depends_on:
+      - victoria-metrics
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/etc/overdrive/secrets/grafana_admin_password
+      - GF_SERVER_DOMAIN=localhost
+      - GF_SERVER_ROOT_URL=http://localhost:13001/
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "${SANDBOX_BIND:-127.0.0.1}:13001:3000"
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    restart: unless-stopped
+
+  api:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in cloud/.env}/cloud-api:${CLOUD_TAG:-main}
+    depends_on:
+      - victoria-metrics
+    environment:
+      - FLEET_VM_URL=http://victoria-metrics:8428
+      - FLEET_METRIC_SUFFIX=${FLEET_METRIC_SUFFIX-:avg}
+      - FLEET_DEPLOYMENT_ID=${FLEET_DEPLOYMENT_ID}
+      - FLEET_NODE_URL_TEMPLATE=${FLEET_NODE_URL_TEMPLATE}
+      - FLEET_NODE_DOMAIN=${FLEET_NODE_DOMAIN}
+      - FLEET_NODE_SUBDOMAIN=${FLEET_NODE_SUBDOMAIN}
+      - FLEET_LOOKBACK_SECONDS=${FLEET_LOOKBACK_SECONDS:-3600}
+      - FLEET_GPS_STALE_SECONDS=${FLEET_GPS_STALE_SECONDS:-1800}
+      - FLEET_DB_PATH=/data/fleet.db
+      - FLEET_ACCESS_AUD=${FLEET_ACCESS_AUD}
+      - FLEET_ACCESS_TEAM_DOMAIN=${FLEET_ACCESS_TEAM_DOMAIN}
+      - FLEET_ACCESS_CERTS_URL=${FLEET_ACCESS_CERTS_URL}
+      - FLEET_ACCESS_JWT_HEADER=${FLEET_ACCESS_JWT_HEADER}
+      - FLEET_ACCESS_ISSUER=${FLEET_ACCESS_ISSUER}
+      - FLEET_ACCESS_JWKS_TTL=${FLEET_ACCESS_JWKS_TTL}
+      - FLEET_ACCESS_JWT_LEEWAY=${FLEET_ACCESS_JWT_LEEWAY}
+      - FLEET_ACCESS_BYPASS_PATHS=${FLEET_ACCESS_BYPASS_PATHS}
+      - MAP_DEFAULT_PROVIDER=${MAP_DEFAULT_PROVIDER:-esri}
+      - MAPBOX_TOKEN=${MAPBOX_TOKEN}
+      - MAPBOX_TOKEN_FILE=${MAPBOX_TOKEN_FILE}
+      - ESRI_TOKEN=${ESRI_TOKEN}
+      - MAPBOX_FREE_TILES_PER_MONTH=${MAPBOX_FREE_TILES_PER_MONTH:-750000}
+      - ESRI_FREE_TILES_PER_MONTH=${ESRI_FREE_TILES_PER_MONTH:-2000000}
+      - GUARDRAIL_LIMIT_PCT=${GUARDRAIL_LIMIT_PCT:-0.95}
+      - FLEET_MAP_TILES_LOOKBACK_SECONDS=${FLEET_MAP_TILES_LOOKBACK_SECONDS:-3600}
+      - FLEET_REPORTS_PATH=${FLEET_REPORTS_PATH:-/data/reports}
+      - FLEET_REPORTS_UPLOAD_TOKEN=${FLEET_REPORTS_UPLOAD_TOKEN}
+      - FLEET_REPORTS_TIMEZONE=${FLEET_REPORTS_TIMEZONE:-America/Los_Angeles}
+      - APP_VERSION=${CLOUD_TAG:-main}
+      - GIT_SHA=${CLOUD_GIT_SHA:-}
+    volumes:
+      - fleet_data:/data
+      - fleet_reports:/data/reports
+      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+    restart: unless-stopped
+
+  map:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in cloud/.env}/cloud-map:${CLOUD_TAG:-main}
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2}
+    depends_on:
+      - victoria-metrics
+      - api
+      - map
+    ports:
+      - "${SANDBOX_BIND:-127.0.0.1}:18080:18080"
+      - "${SANDBOX_BIND:-127.0.0.1}:18428:18428"
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ./Caddyfile.sandbox:/etc/caddy/Caddyfile:ro
+      - ./caddy-entrypoint.sh:/entrypoint.sh:ro
+      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - VM_WRITE_USER=${VM_WRITE_USER}
+      - VM_WRITE_PASS_HASH=${VM_WRITE_PASS_HASH}
+      - VM_WRITE_PASS_HASH_FILE=${VM_WRITE_PASS_HASH_FILE}
+    restart: unless-stopped
+
+volumes:
+  vmdata:
+  grafana:
+  fleet_data:
+  fleet_reports:
+  caddy_data:
+  caddy_config:

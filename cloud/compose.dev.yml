@@ -1,0 +1,106 @@
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: cloud-victoria-metrics
+    command:
+      - "-storageDataPath=/storage"
+      - "-retentionPeriod=${VM_RETENTION:-365d}"
+      - "-httpListenAddr=:8428"
+    volumes:
+      - vmdata:/storage
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cloud-grafana
+    depends_on:
+      - victoria-metrics
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/etc/overdrive/secrets/grafana_admin_password
+      - GF_SERVER_DOMAIN=grafana.${BASE_DOMAIN}
+      - GF_SERVER_ROOT_URL=https://grafana.${BASE_DOMAIN}/
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./services/api
+    container_name: cloud-api
+    depends_on:
+      - victoria-metrics
+    environment:
+      - FLEET_VM_URL=http://victoria-metrics:8428
+      - FLEET_METRIC_SUFFIX=${FLEET_METRIC_SUFFIX-:avg}
+      - FLEET_DEPLOYMENT_ID=${FLEET_DEPLOYMENT_ID}
+      - FLEET_NODE_URL_TEMPLATE=${FLEET_NODE_URL_TEMPLATE}
+      - FLEET_LOOKBACK_SECONDS=${FLEET_LOOKBACK_SECONDS:-3600}
+      - FLEET_GPS_STALE_SECONDS=${FLEET_GPS_STALE_SECONDS:-1800}
+      - FLEET_DB_PATH=/data/fleet.db
+      - FLEET_ACCESS_AUD=${FLEET_ACCESS_AUD}
+      - FLEET_ACCESS_TEAM_DOMAIN=${FLEET_ACCESS_TEAM_DOMAIN}
+      - FLEET_ACCESS_CERTS_URL=${FLEET_ACCESS_CERTS_URL}
+      - FLEET_ACCESS_JWT_HEADER=${FLEET_ACCESS_JWT_HEADER}
+      - FLEET_ACCESS_ISSUER=${FLEET_ACCESS_ISSUER}
+      - FLEET_ACCESS_JWKS_TTL=${FLEET_ACCESS_JWKS_TTL}
+      - FLEET_ACCESS_JWT_LEEWAY=${FLEET_ACCESS_JWT_LEEWAY}
+      - FLEET_ACCESS_BYPASS_PATHS=${FLEET_ACCESS_BYPASS_PATHS}
+      - MAP_DEFAULT_PROVIDER=${MAP_DEFAULT_PROVIDER:-esri}
+      - MAPBOX_TOKEN=${MAPBOX_TOKEN}
+      - MAPBOX_TOKEN_FILE=${MAPBOX_TOKEN_FILE}
+      - ESRI_TOKEN=${ESRI_TOKEN}
+      - MAPBOX_FREE_TILES_PER_MONTH=${MAPBOX_FREE_TILES_PER_MONTH:-750000}
+      - ESRI_FREE_TILES_PER_MONTH=${ESRI_FREE_TILES_PER_MONTH:-2000000}
+      - GUARDRAIL_LIMIT_PCT=${GUARDRAIL_LIMIT_PCT:-0.95}
+      - FLEET_MAP_TILES_LOOKBACK_SECONDS=${FLEET_MAP_TILES_LOOKBACK_SECONDS:-3600}
+      - FLEET_REPORTS_PATH=${FLEET_REPORTS_PATH:-/data/reports}
+      - FLEET_REPORTS_UPLOAD_TOKEN=${FLEET_REPORTS_UPLOAD_TOKEN}
+      - FLEET_REPORTS_TIMEZONE=${FLEET_REPORTS_TIMEZONE:-America/Los_Angeles}
+    volumes:
+      - fleet_data:/data
+      - fleet_reports:/data/reports
+      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+    restart: unless-stopped
+
+  map:
+    build:
+      context: ./services/map
+    container_name: cloud-map
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: cloud-proxy
+    depends_on:
+      - victoria-metrics
+      - grafana
+    ports:
+      - "443:443"
+      - "80:80"
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy-entrypoint.sh:/entrypoint.sh:ro
+      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - BASE_DOMAIN=${BASE_DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+      - VM_WRITE_USER=${VM_WRITE_USER}
+      - VM_WRITE_PASS_HASH=${VM_WRITE_PASS_HASH}
+      - VM_WRITE_PASS_HASH_FILE=${VM_WRITE_PASS_HASH_FILE}
+    restart: unless-stopped
+
+volumes:
+  vmdata:
+  grafana:
+  caddy_data:
+  caddy_config:
+  fleet_data:
+  fleet_reports:

@@ -1,0 +1,11 @@
+# WiFi + firmware packages installed during first boot (one per line).
+network-manager
+wpasupplicant
+iw
+rfkill
+wireless-tools
+pciutils
+firmware-iwlwifi
+firmware-realtek
+firmware-atheros
+firmware-brcm80211

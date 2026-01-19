@@ -1,0 +1,732 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": "$ds",
+        "enable": true,
+        "expr": "changes(ovr_event_active{system_id=\"$system_id\",event_id=~\"$event_id\"}[1s]) != 0",
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "name": "Event Changes",
+        "showIn": 0,
+        "textFormat": "event={{event_id}}",
+        "titleFormat": "{{event_id}}",
+        "type": "tags"
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "Ended"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Active"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "rowHeight": 0.9,
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "expr": "max by (event_id) (ovr_event_active{system_id=\"$system_id\",event_id=~\"$event_id\"})",
+          "legendFormat": "{{event_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Timeline",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "Inactive"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "Active"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 2,
+      "options": {
+        "rowHeight": 0.9,
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "expr": "max by (location) (ovr_event_active{system_id=\"$system_id\",event_id=~\"$event_id\"})",
+          "legendFormat": "{{location}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Location Timeline",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "victron_ac_in_power{system_id=\"$system_id\"}",
+          "legendFormat": "AC In",
+          "refId": "A"
+        },
+        {
+          "expr": "victron_ac_out_power{system_id=\"$system_id\"}",
+          "legendFormat": "AC Out",
+          "refId": "B"
+        },
+        {
+          "expr": "victron_dc_power{system_id=\"$system_id\"}",
+          "legendFormat": "DC",
+          "refId": "C"
+        },
+        {
+          "expr": "acuvim_P{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} P",
+          "refId": "D"
+        }
+      ],
+      "title": "Power Flow Overview",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "victron_ac_out_power{system_id=\"$system_id\"} * on(system_id) group_left(event_id) (ovr_event_active{system_id=\"$system_id\",event_id=~\"$event_id\"} == 1)",
+          "legendFormat": "{{event_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Window AC Out Power",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(acuvim_P{device=~\"$acuvim_device\"}) - victron_ac_out_power{system_id=\"$system_id\"}",
+          "legendFormat": "Delta",
+          "refId": "A"
+        }
+      ],
+      "title": "Delta (Acuvim Total - Victron AC Out)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "100 * victron_ac_out_power{system_id=\"$system_id\"} / clamp_min(abs(victron_dc_power{system_id=\"$system_id\"}), 1)",
+          "legendFormat": "Efficiency",
+          "refId": "A"
+        }
+      ],
+      "title": "Efficiency (AC Out / DC)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 22
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "100 * victron_ac_out_power{system_id=\"$system_id\"} / clamp_min(victron_ac_out_apparent{system_id=\"$system_id\"}, 1)",
+          "legendFormat": "Victron PF",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * acuvim_P{device=~\"$acuvim_device\"} / clamp_min(sqrt((acuvim_P{device=~\"$acuvim_device\"} * acuvim_P{device=~\"$acuvim_device\"}) + (acuvim_Q{device=~\"$acuvim_device\"} * acuvim_Q{device=~\"$acuvim_device\"})), 1)",
+          "legendFormat": "{{device}} PF",
+          "refId": "B"
+        }
+      ],
+      "title": "Power Factor (Victron vs Acuvim)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 22
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "100 * (max(victron_ac_out_l1_i{system_id=\"$system_id\"} or victron_ac_out_l2_i{system_id=\"$system_id\"} or victron_ac_out_l3_i{system_id=\"$system_id\"}) - min(victron_ac_out_l1_i{system_id=\"$system_id\"} or victron_ac_out_l2_i{system_id=\"$system_id\"} or victron_ac_out_l3_i{system_id=\"$system_id\"})) / clamp_min(max(victron_ac_out_l1_i{system_id=\"$system_id\"} or victron_ac_out_l2_i{system_id=\"$system_id\"} or victron_ac_out_l3_i{system_id=\"$system_id\"}), 0.1)",
+          "legendFormat": "Imbalance",
+          "refId": "A"
+        }
+      ],
+      "title": "Phase Imbalance (AC Out Current)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "victron_ac_out_l1_p{system_id=\"$system_id\"}",
+          "legendFormat": "L1",
+          "refId": "A"
+        },
+        {
+          "expr": "victron_ac_out_l2_p{system_id=\"$system_id\"}",
+          "legendFormat": "L2",
+          "refId": "B"
+        },
+        {
+          "expr": "victron_ac_out_l3_p{system_id=\"$system_id\"}",
+          "legendFormat": "L3",
+          "refId": "C"
+        }
+      ],
+      "title": "AC Out Power by Phase",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "volt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "victron_ac_out_l1_v{system_id=\"$system_id\"}",
+          "legendFormat": "L1",
+          "refId": "A"
+        },
+        {
+          "expr": "victron_ac_out_l2_v{system_id=\"$system_id\"}",
+          "legendFormat": "L2",
+          "refId": "B"
+        },
+        {
+          "expr": "victron_ac_out_l3_v{system_id=\"$system_id\"}",
+          "legendFormat": "L3",
+          "refId": "C"
+        }
+      ],
+      "title": "AC Out Voltage (L1-L3)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "amp"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "victron_ac_out_l1_i{system_id=\"$system_id\"}",
+          "legendFormat": "L1",
+          "refId": "A"
+        },
+        {
+          "expr": "victron_ac_out_l2_i{system_id=\"$system_id\"}",
+          "legendFormat": "L2",
+          "refId": "B"
+        },
+        {
+          "expr": "victron_ac_out_l3_i{system_id=\"$system_id\"}",
+          "legendFormat": "L3",
+          "refId": "C"
+        }
+      ],
+      "title": "AC Out Current (L1-L3)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "acuvim_P{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} P",
+          "refId": "A"
+        },
+        {
+          "expr": "acuvim_Q{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} Q",
+          "refId": "B"
+        }
+      ],
+      "title": "Acuvim Real vs Reactive Power",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "volt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "acuvim_Va{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} Va",
+          "refId": "A"
+        },
+        {
+          "expr": "acuvim_Vb{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} Vb",
+          "refId": "B"
+        },
+        {
+          "expr": "acuvim_Vc{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} Vc",
+          "refId": "C"
+        }
+      ],
+      "title": "Acuvim Voltage (Va/Vb/Vc)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "amp"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "acuvim_Ia{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} Ia",
+          "refId": "A"
+        },
+        {
+          "expr": "acuvim_Ib{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} Ib",
+          "refId": "B"
+        },
+        {
+          "expr": "acuvim_Ic{device=~\"$acuvim_device\"}",
+          "legendFormat": "{{device}} Ic",
+          "refId": "C"
+        }
+      ],
+      "title": "Acuvim Current (Ia/Ib/Ic)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "$ds",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "expr": "victron_energy_ac_in1_to_ac_out{system_id=\"$system_id\"}",
+          "legendFormat": "AC In1 -> AC Out",
+          "refId": "A"
+        },
+        {
+          "expr": "victron_energy_inverter_to_ac_out{system_id=\"$system_id\"}",
+          "legendFormat": "Inverter -> AC Out",
+          "refId": "B"
+        },
+        {
+          "expr": "victron_energy_out_to_inverter{system_id=\"$system_id\"}",
+          "legendFormat": "AC Out -> Inverter",
+          "refId": "C"
+        },
+        {
+          "expr": "victron_energy_inverter_to_ac_in1{system_id=\"$system_id\"}",
+          "legendFormat": "Inverter -> AC In1",
+          "refId": "D"
+        }
+      ],
+      "title": "Energy Counters (kWh)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "ovr",
+    "victron",
+    "acuvim",
+    "events",
+    "correlation"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "VictoriaMetrics",
+          "value": "VictoriaMetrics"
+        },
+        "label": "Datasource",
+        "name": "ds",
+        "query": "prometheus",
+        "type": "datasource"
+      },
+      {
+        "datasource": "$ds",
+        "label": "System",
+        "name": "system_id",
+        "query": "label_values(victron_ac_out_power, system_id)",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "datasource": "$ds",
+        "includeAll": true,
+        "label": "Event",
+        "multi": true,
+        "name": "event_id",
+        "query": "label_values(ovr_event_active{system_id=\"$system_id\"}, event_id)",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "datasource": "$ds",
+        "includeAll": true,
+        "label": "Acuvim Device",
+        "multi": true,
+        "name": "acuvim_device",
+        "query": "label_values(acuvim_P, device)",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "",
+  "title": "OVR Power Correlations",
+  "uid": "ovr-power-events",
+  "version": 2
+}

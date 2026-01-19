@@ -1,0 +1,41 @@
+{
+  email {$ACME_EMAIL}
+}
+
+metrics.{$BASE_DOMAIN} {
+  handle /api/v1/write* {
+    request_body {
+      max_size 50MB
+    }
+    basic_auth {
+      {$VM_WRITE_USER} {$VM_WRITE_PASS_HASH}
+    }
+    reverse_proxy victoria-metrics:8428
+  }
+
+  handle /write* {
+    request_body {
+      max_size 50MB
+    }
+    basic_auth {
+      {$VM_WRITE_USER} {$VM_WRITE_PASS_HASH}
+    }
+    reverse_proxy victoria-metrics:8428
+  }
+
+  respond 403
+}
+
+grafana.{$BASE_DOMAIN} {
+  reverse_proxy grafana:3000
+}
+
+map.{$BASE_DOMAIN} {
+  handle /api/* {
+    reverse_proxy api:8081
+  }
+
+  handle {
+    reverse_proxy map:8080
+  }
+}

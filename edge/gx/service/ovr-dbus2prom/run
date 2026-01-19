@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+exec /data/overdrive/dbus2prom/run_exporters.sh

@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: "ovr"
+    orgId: 1
+    folder: "OVR"
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

@@ -1,0 +1,3 @@
+- action: drop
+  source_labels: [__name__]
+  regex: ".+:avg"
