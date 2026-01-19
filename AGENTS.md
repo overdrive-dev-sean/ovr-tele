@@ -15,9 +15,13 @@ It describes *how to make changes* in this repo without breaking field deploymen
 - Create or reference a GitHub Issue for every change.
 - Use a short-lived branch named `feat/<issue>-...` or `fix/<issue>-...`.
 - Use **Conventional Commits** (`feat:`, `fix:`, `docs:`, `chore:`).
+- Mark breaking changes with `feat!:` and document them.
 - Update `CHANGELOG.md` for user-visible changes (or label PR `no-changelog`).
+- Include tests or a short manual test plan.
 
 ## Repo mental model
+
+- Respect repo layout: `edge/`, `cloud/`, `provisioning/edge/`. Don’t invent new top-level folders without justification.
 
 ### Edge (field nodes)
 - Dev compose: `edge/compose.dev.yml`
@@ -35,6 +39,17 @@ It describes *how to make changes* in this repo without breaking field deploymen
   - `cloud/services/api/`
   - `cloud/services/map/`
 
+## Contracts and compatibility
+
+- Treat these as contracts: metrics names/labels, report payload schema, `/api/*` endpoints, and node URL conventions.
+- If any contract changes, update `COMPATIBILITY.md`, add a transition plan in `CHANGELOG.md`, and bump the edge version appropriately.
+
+## Config and secrets
+
+- Never commit secrets. `.env` and `/etc/ovr/*` values must stay out of git.
+- Only update `*.env.example` and docs.
+- When adding config/env vars, add them to `*.env.example`, document in `/docs`, and provide safe defaults.
+
 ## Change checklists
 
 ### If you change **metrics**
@@ -46,10 +61,14 @@ It describes *how to make changes* in this repo without breaking field deploymen
 - Keep it idempotent (safe to re-run)
 - Never hardcode secrets
 - Prefer writing config into `/etc/ovr/`
+- Maintain backwards compatibility for existing nodes or provide a clear migration step
 
 ### If you change **compose files**
+- Use `compose.dev.yml` for local development; do not require GHCR to run locally.
 - Release compose files must remain reproducible.
-- Avoid `:latest` in release compose; if you introduce it, document why.
+- Avoid `:latest` in release or non-dev compose; if you introduce it, document why.
+- Validate with `docker compose config`.
+- Ensure volumes (especially VM storage) are preserved intentionally.
 
 ## Testing expectations
 
@@ -70,3 +89,17 @@ cd ../../../cloud/services/map && npm install && npm run build
 - Cloud builds can ship from `main`, but must support the edge compatibility window.
 
 See `RELEASE.md` and `VERSIONING.md`.
+
+## Extra high-leverage behaviors
+
+Do these automatically whenever relevant:
+
+- Communication and guidance:
+  - Assume the user is still learning the stack; be patient, explicit, and avoid jargon.
+  - When Docker rebuilds or restarts are needed, give exact commands but skip redundant “cd to X” prefaces unless required.
+- If it touches **cloud ingest logic** (report collection):
+  - Add logging for why a report was rejected.
+  - Keep backward compatibility for older payload versions if possible.
+- If it touches **edge reporting code**:
+  - Include the edge version in headers/payload.
+  - Keep retries/backoff safe (don’t spam the server).
