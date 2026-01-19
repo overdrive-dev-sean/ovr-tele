@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 027
 
-ENV_FILE_DEFAULT="/etc/overdrive/firstboot.env"
+ENV_FILE_DEFAULT="/etc/ovr/firstboot.env"
 ENV_FILE="${ENV_FILE:-$ENV_FILE_DEFAULT}"
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASS="${WIFI_PASS:-}"

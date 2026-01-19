@@ -44,11 +44,11 @@ sudo docker compose --env-file edge/pins/vX.Y.Z.env -f compose.release.yml up -d
 
 ## Node configuration
 
-Most node-specific configuration is externalized to `/etc/overdrive/` on the host:
+Most node-specific configuration is externalized to `/etc/ovr/` on the host:
 
-- `/etc/overdrive/site.env` (deployment_id, node_id, remote write URLs, etc)
-- `/etc/overdrive/targets.yml` (optional)
-- `/etc/overdrive/secrets/` (API keys, passwords)
+- `/etc/ovr/site.env` (deployment_id, node_id, remote write URLs, etc)
+- `/etc/ovr/targets.yml` (optional)
+- `/etc/ovr/secrets/` (API keys, passwords)
 
 Provisioning scripts for creating these live in `../provisioning/edge/`.
 

@@ -6,7 +6,7 @@ EDGE_DIR="${EDGE_DIR:-/opt/edge}"
 if [ ! -d "${EDGE_DIR}" ] && [ -d "/opt/stack/edge" ]; then
   EDGE_DIR="/opt/stack/edge"
 fi
-OVERDRIVE_DIR="${OVERDRIVE_DIR:-/etc/overdrive}"
+OVERDRIVE_DIR="${OVERDRIVE_DIR:-/etc/ovr}"
 
 DEPLOYMENT_ID=""
 NODE_ID=""

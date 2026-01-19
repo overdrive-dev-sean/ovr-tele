@@ -32,7 +32,7 @@ grafana.{$BASE_DOMAIN} {
 
 map.{$BASE_DOMAIN} {
   handle /api/* {
-    reverse_proxy api:8081
+    reverse_proxy api:8089
   }
 
   handle {

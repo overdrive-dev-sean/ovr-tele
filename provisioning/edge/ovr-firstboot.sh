@@ -2,9 +2,9 @@
 set -euo pipefail
 umask 027
 
-MARKER="/etc/overdrive/.firstboot_done"
-ENV_FILE="/etc/overdrive/firstboot.env"
-BOOTSTRAP_ARGS_FILE="/etc/overdrive/bootstrap.args"
+MARKER="/etc/ovr/.firstboot_done"
+ENV_FILE="/etc/ovr/firstboot.env"
+BOOTSTRAP_ARGS_FILE="/etc/ovr/bootstrap.args"
 BOOTSTRAP_SCRIPT="/opt/stack/provisioning/edge/bootstrap_n100.sh"
 PACKAGE_LIST_FILE_DEFAULT="/opt/stack/provisioning/edge/firstboot-packages.txt"
 PACKAGE_LIST_FILE="${PACKAGE_LIST_FILE:-$PACKAGE_LIST_FILE_DEFAULT}"
@@ -1075,7 +1075,7 @@ main() {
     run_bootstrap
   fi
 
-  mkdir -p /etc/overdrive
+  mkdir -p /etc/ovr
   touch "$MARKER"
 }
 

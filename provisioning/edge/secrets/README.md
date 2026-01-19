@@ -4,7 +4,7 @@ Do **not** commit real secret values to git.
 
 This folder exists as a *template* for what must be present on a provisioned node under:
 
-- `/etc/overdrive/secrets/`
+- `/etc/ovr/secrets/`
 
 Typical files:
 - `wifi_password`
@@ -14,7 +14,7 @@ Typical files:
 
 Permissions:
 ```bash
-sudo chown -R root:root /etc/overdrive/secrets
-sudo chmod 700 /etc/overdrive/secrets
-sudo chmod 600 /etc/overdrive/secrets/*
+sudo chown -R root:root /etc/ovr/secrets
+sudo chmod 700 /etc/ovr/secrets
+sudo chmod 600 /etc/ovr/secrets/*
 ```

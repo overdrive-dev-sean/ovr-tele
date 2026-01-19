@@ -522,7 +522,7 @@ maybe_prompt_labels() {
     return 0
   fi
 
-  local labels_file="${IFACE_LABELS_FILE:-/etc/overdrive/iface-labels.conf}"
+  local labels_file="${IFACE_LABELS_FILE:-/etc/ovr/iface-labels.conf}"
   local labels_dir
   labels_dir="$(dirname "$labels_file")"
   if [ -n "$labels_dir" ]; then

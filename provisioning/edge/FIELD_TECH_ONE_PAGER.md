@@ -48,7 +48,7 @@ If you must wire multiple ports:
 sudo bash /opt/stack/provisioning/edge/install-packages.sh
 ```
 
-This will also attempt WiFi setup **only if** `WIFI_SSID` is configured (either via `/etc/overdrive/firstboot.env` or by exporting `WIFI_SSID`/`WIFI_PASS` before running the script).
+This will also attempt WiFi setup **only if** `WIFI_SSID` is configured (either via `/etc/ovr/firstboot.env` or by exporting `WIFI_SSID`/`WIFI_PASS` before running the script).
 
 ## 3) WiFi change (optional)
 
@@ -56,7 +56,7 @@ This will also attempt WiFi setup **only if** `WIFI_SSID` is configured (either 
 sudo bash /opt/stack/provisioning/edge/setup-wifi.sh --ssid "SSID" --pass "PASSWORD"
 ```
 
-If `/etc/overdrive/firstboot.env` already has `WIFI_SSID` / `WIFI_PASS`,
+If `/etc/ovr/firstboot.env` already has `WIFI_SSID` / `WIFI_PASS`,
 you can run without args:
 
 ```
@@ -138,9 +138,9 @@ Targets (optional, override defaults):
 ### Bootstrap args via file (recommended)
 
 You can avoid typing by using:
-- `/etc/overdrive/bootstrap.args` (one arg per line)
-- `/etc/overdrive/firstboot.env` (shared defaults)
-- `/etc/overdrive/secrets/*` for passwords
+- `/etc/ovr/bootstrap.args` (one arg per line)
+- `/etc/ovr/firstboot.env` (shared defaults)
+- `/etc/ovr/secrets/*` for passwords
 
 If using multi-port roles with `edge/networking/ovru-netkit`, avoid `--lan-*`/`--wifi-*` flags.
 

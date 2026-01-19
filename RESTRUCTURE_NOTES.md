@@ -35,8 +35,8 @@ The goal is to make:
 
 - Provisioning scripts now default to deploying **from `edge/`**.
 - `bootstrap_n100.sh` supports:
-  - **dev compose** if `/etc/overdrive/edge.env` is absent
-  - **release compose** if `/etc/overdrive/edge.env` exists (it will be sourced)
+  - **dev compose** if `/etc/ovr/edge.env` is absent
+  - **release compose** if `/etc/ovr/edge.env` exists (it will be sourced)
 
 ## "Legacy" docs
 

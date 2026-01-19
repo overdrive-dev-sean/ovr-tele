@@ -7,7 +7,7 @@ LIST_FILE_DEFAULT="${SCRIPT_DIR}/firstboot-packages.txt"
 WIFI_LIST_FILE_DEFAULT="${SCRIPT_DIR}/firstboot-packages-wifi.txt"
 LIST_FILE="${LIST_FILE:-$LIST_FILE_DEFAULT}"
 WIFI_LIST_FILE="${WIFI_LIST_FILE:-$WIFI_LIST_FILE_DEFAULT}"
-FIRSTBOOT_ENV="/etc/overdrive/firstboot.env"
+FIRSTBOOT_ENV="/etc/ovr/firstboot.env"
 if [ -f "$FIRSTBOOT_ENV" ]; then
   set -a
   # shellcheck disable=SC1090

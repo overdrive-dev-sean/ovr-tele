@@ -9,9 +9,9 @@ REMOTE_WRITE_PASSWORD_FILE="${VM_REMOTE_WRITE_PASSWORD_FILE:-}"
 REMOTE_WRITE_PASSWORD="${VM_REMOTE_WRITE_PASSWORD:-}"
 TMP_DATA_PATH="${VM_REMOTE_WRITE_TMPDATA_PATH:-/tmp/vmagent}"
 HTTP_LISTEN_ADDR="${VMAGENT_HTTP_LISTEN_ADDR:-:8429}"
-STREAM_AGGR_CONFIG="${VM_REMOTE_WRITE_STREAM_AGGR_CONFIG:-/etc/overdrive/stream_aggr.yml}"
-LOCAL_RELABEL_CONFIG="${VM_LOCAL_WRITE_RELABEL_CONFIG:-/etc/overdrive/remote_write_local_relabel.yml}"
-REMOTE_RELABEL_CONFIG="${VM_REMOTE_WRITE_RELABEL_CONFIG:-/etc/overdrive/remote_write_cloud_relabel.yml}"
+STREAM_AGGR_CONFIG="${VM_REMOTE_WRITE_STREAM_AGGR_CONFIG:-/etc/ovr/stream_aggr.yml}"
+LOCAL_RELABEL_CONFIG="${VM_LOCAL_WRITE_RELABEL_CONFIG:-/etc/ovr/remote_write_local_relabel.yml}"
+REMOTE_RELABEL_CONFIG="${VM_REMOTE_WRITE_RELABEL_CONFIG:-/etc/ovr/remote_write_cloud_relabel.yml}"
 
 args="-promscrape.config=${SCRAPE_CONFIG} -remoteWrite.tmpDataPath=${TMP_DATA_PATH} -httpListenAddr=${HTTP_LISTEN_ADDR}"
 
