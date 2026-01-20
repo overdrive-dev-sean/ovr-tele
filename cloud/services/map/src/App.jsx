@@ -157,27 +157,15 @@ const formatEventTimestamp = (value) => {
   return new Date(ms).toLocaleString();
 };
 
-const buildNodesUrl = (deploymentIds, eventId) => {
+const buildNodesUrl = (deploymentIds) => {
   const params = new URLSearchParams();
   if (deploymentIds && deploymentIds.length) {
     deploymentIds.forEach((id) => params.append('deployment_id', id));
-  }
-  if (eventId) {
-    params.append('event_id', eventId);
   }
   if ([...params.keys()].length === 0) {
     return `${API_BASE}/nodes`;
   }
   return `${API_BASE}/nodes?${params.toString()}`;
-};
-
-const buildNodeUrl = (nodeId, eventId) => {
-  if (!nodeId) return '';
-  const host = window.location.host;
-  const baseDomain = host.startsWith('map.') ? host.slice(4) : host;
-  const baseUrl = `https://${nodeId}.${baseDomain}`;
-  if (!eventId) return baseUrl;
-  return `${baseUrl}?event_id=${encodeURIComponent(eventId)}`;
 };
 
 const getStatusClass = (node) => {
@@ -254,7 +242,7 @@ const buildGroupMarkerSize = (rows) => {
   return { width, height };
 };
 
-const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventIdOverride) => {
+const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventLabel) => {
   const status = getGroupStatus(groupNodes);
   const labelSource = group.primary || group.mapNode || groupNodes[0];
   const label = escapeHtml(labelSource?.system_id || group.key);
@@ -263,8 +251,7 @@ const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventIdOverride) =>
     0
   );
   const alerts = alertCount > 0 ? `!${alertCount}` : '';
-  const eventIdRaw = eventIdOverride || labelSource?.event_id;
-  const eventId = eventIdRaw ? escapeHtml(eventIdRaw) : '';
+  const eventId = eventLabel ? escapeHtml(eventLabel) : '';
   const eventCount = eventGroup?.count ? ` (${eventGroup.count})` : '';
   const eventTag = eventId
     ? `<div class="marker-event" title="${eventId}${eventCount}">${eventId}${eventCount}</div>`
@@ -321,7 +308,7 @@ const buildSpiderfyPositions = (center, count) => {
   return positions;
 };
 
-const buildMarkerHtml = (node, eventLoggers) => {
+const buildMarkerHtml = (node, eventLoggers, eventLabel) => {
   const status = getStatusClass(node);
   const label = escapeHtml(node.system_id);
   const isLogger = Boolean(node.is_logger);
@@ -337,7 +324,7 @@ const buildMarkerHtml = (node, eventLoggers) => {
       : '--'
     : formatPower(node.pout);
   const alerts = node.alerts_count > 0 ? `!${node.alerts_count}` : '';
-  const eventId = node.event_id ? escapeHtml(node.event_id) : '';
+  const eventId = eventLabel ? escapeHtml(eventLabel) : '';
   const eventCount = eventLoggers && eventLoggers.length ? ` (${eventLoggers.length})` : '';
   const eventTag = eventId
     ? `<div class="marker-event" title="${eventId}${eventCount}">${eventId}${eventCount}</div>`
@@ -361,10 +348,10 @@ const buildMarkerHtml = (node, eventLoggers) => {
   `;
 };
 
-const buildPopupHtml = (node, eventDetails, eventIdOverride) => {
+const buildPopupHtml = (node, eventDetails, eventLabel) => {
   const location = node.location ? escapeHtml(node.location) : '--';
   const alerts = node.alerts && node.alerts.length ? escapeHtml(node.alerts.join(', ')) : 'None';
-  const rawEventId = eventIdOverride || node.event_id;
+  const rawEventId = eventLabel || node.event_id;
   const eventId = rawEventId ? escapeHtml(rawEventId) : '--';
   const isLogger = Boolean(node.is_logger);
   const hasAcuvim = isLogger && node.acuvim_updated_at !== null && node.acuvim_updated_at !== undefined;
@@ -406,7 +393,11 @@ export default function App() {
   const [selectedDeployments, setSelectedDeployments] = useState([]);
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState('');
-  const [eventNodeInput, setEventNodeInput] = useState('');
+  const [eventNameInput, setEventNameInput] = useState('');
+  const [eventCreateConflict, setEventCreateConflict] = useState(null);
+  const [pendingEventId, setPendingEventId] = useState('');
+  const [pendingEventName, setPendingEventName] = useState('');
+  const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [aliasNodeInput, setAliasNodeInput] = useState('');
   const [aliasTempEventInput, setAliasTempEventInput] = useState('');
   const [reportEvents, setReportEvents] = useState([]);
@@ -446,12 +437,34 @@ export default function App() {
   const lastRecommendedRef = useRef(null);
 
   const pollSeconds = POLL_INTERVALS[pollIndex] || POLL_INTERVALS[POLL_INTERVALS.length - 1];
+  const eventNameMap = useMemo(() => {
+    const map = new Map();
+    events.forEach((event) => {
+      const label = event.event_name || event.name || event.event_id;
+      if (event.event_id && label) {
+        map.set(event.event_id, label);
+      }
+    });
+    if (pendingEventId && pendingEventName) {
+      map.set(pendingEventId, pendingEventName);
+    }
+    return map;
+  }, [events, pendingEventId, pendingEventName]);
+  const eventLabelForId = (eventId) => {
+    if (!eventId) return '';
+    return eventNameMap.get(eventId) || eventId;
+  };
   const selectedEventDetail = useMemo(
     () => events.find((event) => event.event_id === selectedEvent) || null,
     [events, selectedEvent]
   );
   const activeEventsCount = useMemo(
-    () => events.filter((event) => event.status === 'active').length,
+    () => {
+      if (!events.length) return 0;
+      const hasStatus = events.some((event) => event.status);
+      if (!hasStatus) return events.length;
+      return events.filter((event) => event.status === 'active').length;
+    },
     [events]
   );
   const mapBlocked = mapStatus?.blocked || {};
@@ -530,7 +543,14 @@ export default function App() {
     return false;
   };
 
-  const visibleNodes = useMemo(() => nodes.filter(hasFreshSignal), [nodes]);
+  const filteredNodes = useMemo(() => {
+    if (!selectedEvent) return nodes;
+    return nodes.filter((node) => node.event_id === selectedEvent);
+  }, [nodes, selectedEvent]);
+  const visibleNodes = useMemo(
+    () => filteredNodes.filter(hasFreshSignal),
+    [filteredNodes]
+  );
   const liveEventNodes = useMemo(() => {
     if (!selectedEvent) return [];
     const ids = new Set();
@@ -541,6 +561,25 @@ export default function App() {
     });
     return [...ids];
   }, [nodes, selectedEvent]);
+  const availableNodes = useMemo(() => {
+    const seen = new Set();
+    const options = [];
+    nodes.forEach((node) => {
+      if (!hasFreshSignal(node)) return;
+      if (node.is_logger) return;
+      const nodeId = node.node_id ? String(node.node_id).trim() : '';
+      if (!nodeId || seen.has(nodeId)) return;
+      seen.add(nodeId);
+      options.push({
+        node_id: nodeId,
+        system_id: node.system_id,
+        deployment_id: node.deployment_id,
+        location: node.location
+      });
+    });
+    options.sort((a, b) => String(a.system_id).localeCompare(String(b.system_id)));
+    return options;
+  }, [nodes]);
 
   const getGroupKey = (node) =>
     node.node_id || node.host_system_id || node.system_id || 'unknown';
@@ -718,8 +757,7 @@ export default function App() {
 
   const fetchNodes = async () => {
     try {
-      const effectiveEvent = selectedEvent || '';
-      const resp = await fetch(buildNodesUrl(selectedDeployments, effectiveEvent), { cache: 'no-store' });
+      const resp = await fetch(buildNodesUrl(selectedDeployments), { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load nodes');
       const payload = await resp.json();
       setNodes(payload.nodes || []);
@@ -749,20 +787,31 @@ export default function App() {
 
   const fetchEvents = async () => {
     try {
-      const resp = await fetch(`${API_BASE}/events?status=all`, { cache: 'no-store' });
+      const params = new URLSearchParams();
+      if (selectedDeployments.length) {
+        selectedDeployments.forEach((id) => params.append('deployment_id', id));
+      }
+      const url = params.toString()
+        ? `${API_BASE}/events?${params.toString()}`
+        : `${API_BASE}/events`;
+      const resp = await fetch(url, { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load events');
       const payload = await resp.json();
       const items = Array.isArray(payload.events) ? payload.events : [];
       const eventIds = items.map((item) => item.event_id).filter(Boolean);
       setEvents(items);
       if (eventIds.length === 0) {
-        if (selectedEvent) setSelectedEvent('');
-      } else if (selectedEvent && !eventIds.includes(selectedEvent)) {
+        if (selectedEvent && selectedEvent !== pendingEventId) setSelectedEvent('');
+      } else if (
+        selectedEvent &&
+        !eventIds.includes(selectedEvent) &&
+        selectedEvent !== pendingEventId
+      ) {
         setSelectedEvent('');
       }
     } catch (err) {
       setEvents([]);
-      if (selectedEvent) {
+      if (selectedEvent && selectedEvent !== pendingEventId) {
         setSelectedEvent('');
       }
     }
@@ -814,25 +863,61 @@ export default function App() {
     }
   };
 
-  const createEvent = async () => {
-    const name = window.prompt('Event name');
-    if (!name) return;
+  const submitCreateEvent = async (nameOverride) => {
+    const name = (nameOverride || eventNameInput).trim();
+    if (!name) {
+      setStatusMessage('Enter an event name to create.');
+      return;
+    }
+    setEventCreateConflict(null);
     try {
-      const resp = await fetch(`${API_BASE}/events`, {
+      const resp = await fetch(`${API_BASE}/events/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name })
+        body: JSON.stringify({ event_name: name })
       });
+      if (resp.status === 409) {
+        const payload = await resp.json();
+        setEventCreateConflict(payload);
+        setStatusMessage('Event name already exists.');
+        return;
+      }
       if (!resp.ok) throw new Error('Failed to create event');
       const payload = await resp.json();
       await fetchEvents();
+      setEventNameInput('');
       if (payload?.event_id) {
         setSelectedEvent(payload.event_id);
+        setPendingEventId(payload.event_id);
+        setPendingEventName(payload?.event_name || payload?.name || name);
+        setSelectedNodeIds([]);
       }
-      setStatusMessage(`Event created: ${payload?.name || payload?.event_id || name}`);
+      setStatusMessage(`Event created: ${payload?.event_name || payload?.name || name}`);
     } catch (err) {
       setStatusMessage('Unable to create event.');
     }
+  };
+
+  const createEvent = async () => {
+    await submitCreateEvent();
+  };
+
+  const useExistingEvent = () => {
+    const existing = eventCreateConflict?.existing;
+    if (!existing?.event_id) return;
+    setSelectedEvent(existing.event_id);
+    setPendingEventId(existing.event_id);
+    setPendingEventName(existing.event_name || existing.event_id);
+    setEventCreateConflict(null);
+    setStatusMessage(`Using existing event: ${existing.event_name || existing.event_id}`);
+  };
+
+  const useSuggestedEventName = async () => {
+    const suggested = eventCreateConflict?.suggested?.event_name;
+    if (!suggested) return;
+    setEventNameInput(suggested);
+    setEventCreateConflict(null);
+    await submitCreateEvent(suggested);
   };
 
   const endEvent = async () => {
@@ -845,52 +930,56 @@ export default function App() {
       if (!resp.ok) throw new Error('Failed to end event');
       await fetchEvents();
       setStatusMessage('Event ended.');
+      if (pendingEventId === selectedEvent) {
+        setPendingEventId('');
+        setPendingEventName('');
+      }
     } catch (err) {
       setStatusMessage('Unable to end event.');
     }
   };
 
-  const addNodeToEvent = async () => {
-    const nodeId = eventNodeInput.trim();
-    if (!selectedEvent || !nodeId) {
-      setStatusMessage('Select an event and node id to add.');
+  const toggleNodeSelection = (nodeId) => {
+    setSelectedNodeIds((prev) => {
+      if (prev.includes(nodeId)) {
+        return prev.filter((id) => id !== nodeId);
+      }
+      return [...prev, nodeId];
+    });
+  };
+
+  const addNodesToEvent = async () => {
+    if (!selectedEvent) {
+      setStatusMessage('Select an event before adding nodes.');
+      return;
+    }
+    if (!selectedNodeIds.length) {
+      setStatusMessage('Select at least one node to add.');
       return;
     }
     try {
       const resp = await fetch(
-        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/nodes`,
+        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/add_nodes`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ node_id: nodeId })
+          body: JSON.stringify({ node_ids: selectedNodeIds })
         }
       );
-      if (!resp.ok) throw new Error('Failed to add node');
-      setEventNodeInput('');
-      await fetchEvents();
-      const nodeUrl = buildNodeUrl(nodeId, selectedEvent);
-      if (nodeUrl && window.confirm('Node added. Open node UI to assign loggers?')) {
-        window.open(nodeUrl, '_blank', 'noreferrer');
+      if (!resp.ok) throw new Error('Failed to add nodes');
+      const payload = await resp.json();
+      setSelectedNodeIds([]);
+      await fetchNodes();
+      if (pendingEventId === selectedEvent) {
+        setPendingEventId('');
+        setPendingEventName('');
       }
-      setStatusMessage(`Node ${nodeId} added to event.`);
+      const addedCount = payload?.added?.length ?? selectedNodeIds.length;
+      const missingCount = payload?.missing?.length ?? 0;
+      const missingNote = missingCount ? ` (${missingCount} missing)` : '';
+      setStatusMessage(`Added ${addedCount} node(s) to event${missingNote}.`);
     } catch (err) {
-      setStatusMessage('Unable to add node to event.');
-    }
-  };
-
-  const endNodeForEvent = async (nodeId) => {
-    if (!selectedEvent || !nodeId) return;
-    if (!window.confirm(`End event for ${nodeId}?`)) return;
-    try {
-      const resp = await fetch(
-        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/nodes/${encodeURIComponent(nodeId)}/end`,
-        { method: 'POST' }
-      );
-      if (!resp.ok) throw new Error('Failed to end node');
-      await fetchEvents();
-      setStatusMessage(`Node ${nodeId} ended for event.`);
-    } catch (err) {
-      setStatusMessage('Unable to end node for event.');
+      setStatusMessage('Unable to add nodes to event.');
     }
   };
 
@@ -1215,7 +1304,7 @@ export default function App() {
     fetchEvents();
     const interval = setInterval(fetchEvents, 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [selectedDeployments, pendingEventId]);
 
   useEffect(() => {
     fetchNodes();
@@ -1268,11 +1357,12 @@ export default function App() {
       const groupEventId = groupEventNode?.event_id;
       const eventGroup = getEventGroup(groupEventId);
       const eventDetails = formatEventGroupHtml(eventGroup);
+      const eventLabel = groupEventId ? eventLabelForId(groupEventId) : '';
       const groupNodes = getGroupNodes(group);
       const groupSize = buildGroupMarkerSize(groupNodes.length);
       const icon = L.divIcon({
         className: 'marker-wrapper',
-        html: buildGroupMarkerHtml(group, groupNodes, eventGroup, groupEventId),
+        html: buildGroupMarkerHtml(group, groupNodes, eventGroup, eventLabel),
         iconSize: [groupSize.width, groupSize.height],
         iconAnchor: [groupSize.width / 2, groupSize.height],
       });
@@ -1283,14 +1373,14 @@ export default function App() {
           icon,
           draggable: displayNode.gps_source === 'manual',
         });
-        marker.bindPopup(buildPopupHtml(displayNode, eventDetails, groupEventId));
+        marker.bindPopup(buildPopupHtml(displayNode, eventDetails, eventLabel));
         marker.addTo(map);
         markers.set(key, marker);
       } else {
         marker.setLatLng(coords);
         marker.setIcon(icon);
         if (marker.getPopup()) {
-          marker.setPopupContent(buildPopupHtml(displayNode, eventDetails, groupEventId));
+          marker.setPopupContent(buildPopupHtml(displayNode, eventDetails, eventLabel));
         }
       }
 
@@ -1328,14 +1418,15 @@ export default function App() {
           const childEventGroup = getEventGroup(node.event_id);
           const childEventLoggers = getNodeEventLoggers(childEventGroup, node);
           const childDetails = formatEventGroupHtml(childEventGroup);
+          const childEventLabel = node.event_id ? eventLabelForId(node.event_id) : '';
           const childIcon = L.divIcon({
             className: 'marker-wrapper',
-            html: buildMarkerHtml(node, childEventLoggers),
+            html: buildMarkerHtml(node, childEventLoggers, childEventLabel),
             iconSize: [150, 60],
             iconAnchor: [75, 60],
           });
           const childMarker = L.marker([pos.lat, pos.lon], { icon: childIcon });
-          childMarker.bindPopup(buildPopupHtml(node, childDetails));
+          childMarker.bindPopup(buildPopupHtml(node, childDetails, childEventLabel));
           childMarker.addTo(map);
           children.push(childMarker);
         });
@@ -1359,7 +1450,7 @@ export default function App() {
       map.fitBounds(bounds.pad(0.2));
       hasFitRef.current = true;
     }
-  }, [gpsGroups, expandedGroups]);
+  }, [gpsGroups, expandedGroups, eventNameMap]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1449,11 +1540,18 @@ export default function App() {
           <div className="event-select">
             <select
               value={selectedEvent}
-              onChange={(event) => setSelectedEvent(event.target.value)}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSelectedEvent(value);
+                if (pendingEventId && value !== pendingEventId) {
+                  setPendingEventId('');
+                  setPendingEventName('');
+                }
+              }}
             >
               <option value="">All events</option>
               {events.map((event) => {
-                const label = event.name || event.event_id;
+                const label = event.event_name || event.name || event.event_id;
                 const status = event.status === 'ended' ? 'ended' : 'active';
                 return (
                   <option key={event.event_id} value={event.event_id}>
@@ -1462,12 +1560,54 @@ export default function App() {
                 );
               })}
             </select>
-            <div className="event-meta">{`${activeEventsCount} active / ${events.length} total`}</div>
+            <div className="event-meta">
+              {events.length ? `${activeEventsCount} active` : 'No active events'}
+            </div>
           </div>
-          <div className="event-actions">
+          <div className="event-create">
+            <input
+              type="text"
+              value={eventNameInput}
+              onChange={(event) => {
+                setEventNameInput(event.target.value);
+                if (eventCreateConflict) setEventCreateConflict(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  createEvent();
+                }
+              }}
+              placeholder="Event name"
+            />
             <button className="btn" onClick={createEvent} type="button">
-              Start Event
+              Create Event
             </button>
+          </div>
+          {eventCreateConflict ? (
+            <div className="event-conflict">
+              <div>
+                <strong>Name exists:</strong>{' '}
+                {eventCreateConflict.existing?.event_name || eventCreateConflict.existing?.event_id}
+              </div>
+              {eventCreateConflict.suggested?.event_name ? (
+                <div>
+                  <strong>Suggested:</strong> {eventCreateConflict.suggested.event_name}
+                </div>
+              ) : null}
+              <div className="event-conflict-actions">
+                <button className="btn ghost small" type="button" onClick={useExistingEvent}>
+                  Use existing
+                </button>
+                {eventCreateConflict.suggested?.event_name ? (
+                  <button className="btn ghost small" type="button" onClick={useSuggestedEventName}>
+                    Use suggested
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          <div className="event-actions">
             <button
               className="btn ghost"
               onClick={endEvent}
@@ -1477,75 +1617,70 @@ export default function App() {
               End Event
             </button>
           </div>
-          {selectedEventDetail ? (
-            <div className="event-details">
-              <div className="event-row">
-                <strong>Name:</strong> {selectedEventDetail.name || selectedEventDetail.event_id}
-              </div>
-              <div className="event-row">
-                <strong>ID:</strong> {selectedEventDetail.event_id}
-              </div>
-              <div className="event-row">
-                <strong>Status:</strong> {selectedEventDetail.status}
-              </div>
-              <div className="event-row">
-                <strong>Created:</strong> {formatEventTimestamp(selectedEventDetail.created_at)}
-              </div>
-              {selectedEventDetail.ended_at ? (
+          {selectedEvent ? (
+            <>
+              <div className="event-details">
                 <div className="event-row">
-                  <strong>Ended:</strong> {formatEventTimestamp(selectedEventDetail.ended_at)}
+                  <strong>Name:</strong> {eventLabelForId(selectedEvent) || selectedEvent}
                 </div>
-              ) : null}
-              <div className="event-row">
-                <strong>Live nodes:</strong>{' '}
-                {liveEventNodes.length ? liveEventNodes.join(', ') : 'None'}
+                <div className="event-row">
+                  <strong>ID:</strong> {selectedEvent}
+                </div>
+                <div className="event-row">
+                  <strong>Status:</strong>{' '}
+                  {selectedEventDetail?.status ||
+                    (pendingEventId === selectedEvent ? 'pending' : 'active')}
+                </div>
+                {selectedEventDetail?.started_at || selectedEventDetail?.created_at ? (
+                  <div className="event-row">
+                    <strong>Started:</strong>{' '}
+                    {formatEventTimestamp(
+                      selectedEventDetail?.started_at || selectedEventDetail?.created_at
+                    )}
+                  </div>
+                ) : null}
+                {selectedEventDetail?.count !== undefined ? (
+                  <div className="event-row">
+                    <strong>Systems:</strong> {selectedEventDetail.count}
+                  </div>
+                ) : null}
+                <div className="event-row">
+                  <strong>Live nodes:</strong>{' '}
+                  {liveEventNodes.length ? liveEventNodes.join(', ') : 'None'}
+                </div>
               </div>
               <div className="event-node-add">
-                <input
-                  type="text"
-                  value={eventNodeInput}
-                  onChange={(event) => setEventNodeInput(event.target.value)}
-                  placeholder="node_id"
-                />
-                <button className="btn ghost" type="button" onClick={addNodeToEvent}>
-                  Add node
-                </button>
-              </div>
-              <div className="event-nodes">
-                {selectedEventDetail.nodes && selectedEventDetail.nodes.length > 0 ? (
-                  selectedEventDetail.nodes.map((node) => {
-                    const nodeUrl = buildNodeUrl(node.node_id, selectedEventDetail.event_id);
-                    const ended = Boolean(node.ended_at);
-                    return (
-                      <div key={node.node_id} className={`event-node ${ended ? 'ended' : ''}`}>
-                        <div>
-                          <div className="event-node-title">{node.node_id}</div>
-                          <div className="event-node-meta">
-                            Joined {formatEventTimestamp(node.joined_at)}
-                            {ended ? ` · Ended ${formatEventTimestamp(node.ended_at)}` : ''}
-                          </div>
-                        </div>
-                        <div className="event-node-actions">
-                          {nodeUrl ? (
-                            <a className="link" href={nodeUrl} target="_blank" rel="noreferrer">
-                              Open node
-                            </a>
-                          ) : null}
-                          <button
-                            className="btn ghost"
-                            type="button"
-                            onClick={() => endNodeForEvent(node.node_id)}
-                            disabled={ended}
-                          >
-                            End node
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
+                {pendingEventId === selectedEvent ? (
+                  <div className="event-prompt">
+                    Event created. Add your first node to start tracking.
+                  </div>
+                ) : null}
+                {availableNodes.length ? (
+                  <div className="event-node-list">
+                    {availableNodes.map((node) => (
+                      <label key={node.node_id} className="checkbox event-node-option">
+                        <input
+                          type="checkbox"
+                          checked={selectedNodeIds.includes(node.node_id)}
+                          onChange={() => toggleNodeSelection(node.node_id)}
+                        />
+                        <span>
+                          {node.system_id} · {node.node_id}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
                 ) : (
-                  <div className="empty">No nodes added yet.</div>
+                  <div className="empty">No alive nodes available.</div>
                 )}
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={addNodesToEvent}
+                  disabled={!selectedNodeIds.length}
+                >
+                  Add selected nodes
+                </button>
               </div>
               <div className="event-alias">
                 <div className="event-row">
@@ -1569,7 +1704,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
-            </div>
+            </>
           ) : null}
         </div>
 
@@ -1648,7 +1783,7 @@ export default function App() {
                     <div className="node-sub">{node.location || '--'}</div>
                     {groupEventId ? (
                       <div className="node-event">
-                        <span>Event: {groupEventId}</span>
+                        <span>Event: {eventLabelForId(groupEventId)}</span>
                         {!isLogger ? (
                           <span className="node-event-meta">{nodeEventLoggers.length} loggers</span>
                         ) : null}
@@ -1792,7 +1927,7 @@ export default function App() {
                     <div className="node-sub">{node.location || '--'}</div>
                     {groupEventId ? (
                       <div className="node-event">
-                        <span>Event: {groupEventId}</span>
+                        <span>Event: {eventLabelForId(groupEventId)}</span>
                         {!isLogger ? (
                           <span className="node-event-meta">{nodeEventLoggers.length} loggers</span>
                         ) : null}
@@ -1874,7 +2009,7 @@ export default function App() {
             >
               <option value="">Select event</option>
               {reportEvents.map((entry) => {
-                const label = entry.name || entry.event_id;
+                const label = entry.event_name || entry.name || entry.event_id;
                 const suffix = entry.report_nodes ? ` (${entry.report_nodes})` : '';
                 return (
                   <option key={entry.event_id} value={entry.event_id}>

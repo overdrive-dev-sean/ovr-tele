@@ -1,5 +1,7 @@
+import os
 import sqlite3
 import unittest
+from unittest import mock
 
 from map_tiles import (
     build_tile_policy,
@@ -9,6 +11,10 @@ from map_tiles import (
     record_tile_usage,
     set_preferred_provider,
 )
+
+os.environ.setdefault("FLEET_DB_PATH", "/tmp/fleet-test.db")
+
+import app as api_app  # noqa: E402
 
 
 class FleetMapTileTests(unittest.TestCase):
@@ -40,6 +46,17 @@ class FleetMapTileTests(unittest.TestCase):
         policy = build_tile_policy("mapbox", totals, thresholds, 0.95, 1.0, "Jan 2026")
         self.assertEqual(policy["recommended_provider"], "esri")
         self.assertTrue(policy["blocked"]["mapbox"])
+
+    def test_map_tiles_total_fallback(self):
+        with mock.patch.object(api_app, "_map_tiles_metric_names", return_value=["a", "b"]), \
+             mock.patch.object(api_app, "_vm_query_vector_status") as mock_query:
+            mock_query.side_effect = [
+                (True, []),
+                (True, [{"value": [0, "42"]}]),
+            ]
+            value, ok = api_app._map_tiles_total("mapbox", None)
+            self.assertTrue(ok)
+            self.assertEqual(value, 42)
 
 
 if __name__ == "__main__":

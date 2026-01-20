@@ -1,6 +1,5 @@
 # IDE / AI Agent Instructions
 
-This file is written for IDE agents (Copilot, Cursor, etc.).
 It describes *how to make changes* in this repo without breaking field deployments.
 
 ## Golden rules

@@ -34,7 +34,8 @@ services:
       - victoria-metrics
     environment:
       - FLEET_VM_URL=http://victoria-metrics:8428
-      - FLEET_METRIC_SUFFIX=${FLEET_METRIC_SUFFIX-:avg}
+      - FLEET_VM_WRITE_URL=${FLEET_VM_WRITE_URL:-http://victoria-metrics:8428/write}
+      - FLEET_METRIC_SUFFIX=${FLEET_METRIC_SUFFIX-:10s_avg}
       - FLEET_DEPLOYMENT_ID=${FLEET_DEPLOYMENT_ID}
       - FLEET_NODE_URL_TEMPLATE=${FLEET_NODE_URL_TEMPLATE}
       - FLEET_LOOKBACK_SECONDS=${FLEET_LOOKBACK_SECONDS:-3600}

@@ -493,6 +493,30 @@ h1 {
   margin-top: 8px;
 }
 
+.event-create {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.event-conflict {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px dashed var(--border);
+  background: var(--panel-alt);
+  font-size: 12px;
+  color: var(--text);
+  display: grid;
+  gap: 6px;
+}
+
+.event-conflict-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .event-details {
   margin-top: 10px;
   display: grid;
@@ -507,12 +531,35 @@ h1 {
 }
 
 .event-node-add {
-  display: flex;
+  display: grid;
+  gap: 8px;
+}
+
+.event-node-list {
+  display: grid;
   gap: 6px;
-  flex-wrap: wrap;
+  max-height: 160px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.event-node-option {
+  font-size: 12px;
+  color: var(--text);
+  align-items: center;
+}
+
+.event-prompt {
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px dashed var(--border);
+  background: var(--panel-alt);
+  font-size: 12px;
+  color: var(--text);
 }
 
 .event-node-add input,
+.event-create input,
 .event-alias-inputs input {
   flex: 1 1 140px;
   border: 1px solid var(--border);
@@ -949,8 +996,7 @@ h1 {
 @media (max-width: 980px) {
   .app {
     grid-template-columns: 1fr;
-    height: 100vh;
-    height: 100dvh;
+    min-height: 100dvh;
   }
   .sidebar {
     border-right: none;

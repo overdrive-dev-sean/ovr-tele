@@ -33,7 +33,10 @@ app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
 VM_URL = os.getenv("FLEET_VM_URL", "http://victoria-metrics:8428").rstrip("/")
-METRIC_SUFFIX = os.getenv("FLEET_METRIC_SUFFIX", ":avg")
+VM_WRITE_URL = os.getenv(
+    "FLEET_VM_WRITE_URL", "http://victoria-metrics:8428/write"
+).strip()
+METRIC_SUFFIX = os.getenv("FLEET_METRIC_SUFFIX", ":10s_avg")
 DEPLOYMENT_ID = os.getenv("FLEET_DEPLOYMENT_ID", "").strip()
 NODE_URL_TEMPLATE = os.getenv("FLEET_NODE_URL_TEMPLATE", "").strip()
 NODE_DOMAIN = os.getenv("FLEET_NODE_DOMAIN", "").strip()
@@ -130,6 +133,16 @@ CREATE TABLE IF NOT EXISTS events (
   created_at INTEGER NOT NULL,
   ended_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS events_registry (
+  event_id TEXT PRIMARY KEY,
+  event_name TEXT NOT NULL,
+  event_name_norm TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_registry_name_norm
+  ON events_registry(event_name_norm);
 CREATE TABLE IF NOT EXISTS event_nodes (
   event_id TEXT NOT NULL,
   node_id TEXT NOT NULL,
@@ -330,6 +343,201 @@ def _alias_temp_event_ids() -> set[str]:
     with _get_db() as conn:
         rows = conn.execute("SELECT temp_event_id FROM event_aliases").fetchall()
     return {row["temp_event_id"] for row in rows if row["temp_event_id"]}
+
+# ============================================================================
+# Event Registry
+# ============================================================================
+
+_EVENT_NAME_SPACE_RE = re.compile(r"\s+")
+
+
+def _clean_event_name(value: Any) -> str:
+    if value is None:
+        return ""
+    return _EVENT_NAME_SPACE_RE.sub(" ", str(value).strip())
+
+
+def _normalize_event_name(value: Any) -> str:
+    return _clean_event_name(value).lower()
+
+
+def _parse_event_timestamp(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        ts = int(float(value))
+    except Exception:
+        return None
+    if ts <= 0:
+        return None
+    if ts > 1_000_000_000_000_000:
+        return int(ts / 1_000_000_000)
+    if ts > 1_000_000_000_000:
+        return int(ts / 1_000)
+    return ts
+
+
+def _event_registry_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "event_id": row["event_id"],
+        "event_name": row["event_name"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
+    }
+
+
+def _event_registry_status(entry: Dict[str, Any]) -> str:
+    return "ended" if entry.get("ended_at") else "active"
+
+
+def _get_event_registry(event_id: str) -> Optional[Dict[str, Any]]:
+    with _get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT event_id, event_name, created_at, started_at, ended_at
+            FROM events_registry WHERE event_id = ?
+            """,
+            (event_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return _event_registry_row(row)
+
+
+def _get_event_registry_by_norm(name_norm: str) -> Optional[Dict[str, Any]]:
+    if not name_norm:
+        return None
+    with _get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT event_id, event_name, created_at, started_at, ended_at
+            FROM events_registry WHERE event_name_norm = ?
+            """,
+            (name_norm,),
+        ).fetchone()
+    if not row:
+        return None
+    return _event_registry_row(row)
+
+
+def _list_event_registry(
+    status: str = "all",
+    event_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    clauses: List[str] = []
+    params: List[Any] = []
+    if event_id:
+        clauses.append("event_id = ?")
+        params.append(event_id)
+    if status == "active":
+        clauses.append("ended_at IS NULL")
+    elif status == "ended":
+        clauses.append("ended_at IS NOT NULL")
+    query = """
+        SELECT event_id, event_name, created_at, started_at, ended_at
+        FROM events_registry
+    """
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY started_at DESC, created_at DESC"
+    with _get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_event_registry_row(row) for row in rows]
+
+
+def _event_registry_lookup(event_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not event_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(event_ids))
+    query = f"""
+        SELECT event_id, event_name, created_at, started_at, ended_at
+        FROM events_registry WHERE event_id IN ({placeholders})
+    """
+    with _get_db() as conn:
+        rows = conn.execute(query, event_ids).fetchall()
+    return {row["event_id"]: _event_registry_row(row) for row in rows}
+
+
+def _ensure_legacy_event(event_id: str, name: str, created_at: int) -> None:
+    if not event_id:
+        return
+    with _get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO events (event_id, name, status, created_at, ended_at)
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (event_id, name, "active", created_at),
+        )
+        conn.commit()
+
+
+def _mark_legacy_event_ended(event_id: str, ended_at: int) -> None:
+    if not event_id:
+        return
+    with _get_db() as conn:
+        conn.execute(
+            "UPDATE events SET status = ?, ended_at = ? WHERE event_id = ?",
+            ("ended", ended_at, event_id),
+        )
+        conn.commit()
+
+
+def _create_event_registry_entry(
+    event_name: str, started_at: Optional[int]
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    cleaned = _clean_event_name(event_name)
+    if not cleaned:
+        return None, None
+    name_norm = _normalize_event_name(cleaned)
+    existing = _get_event_registry_by_norm(name_norm)
+    if existing:
+        return None, existing
+    created_at = _event_timestamp()
+    started_at = started_at or created_at
+    event_id = _generate_event_id()
+    try:
+        with _get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO events_registry
+                (event_id, event_name, event_name_norm, created_at, started_at, ended_at)
+                VALUES (?, ?, ?, ?, ?, NULL)
+                """,
+                (event_id, cleaned, name_norm, created_at, started_at),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
+        existing = _get_event_registry_by_norm(name_norm)
+        return None, existing
+
+    _ensure_legacy_event(event_id, cleaned, created_at)
+    return {
+        "event_id": event_id,
+        "event_name": cleaned,
+        "created_at": created_at,
+        "started_at": started_at,
+        "ended_at": None,
+    }, None
+
+
+def _end_event_registry(event_id: str, ended_at: int) -> bool:
+    if not event_id:
+        return False
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT event_id FROM events_registry WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE events_registry SET ended_at = ? WHERE event_id = ?",
+            (ended_at, event_id),
+        )
+        conn.commit()
+    return True
 
 # ============================================================================
 # Cloudflare Access JWT
@@ -537,6 +745,76 @@ def _escape_label(value: str) -> str:
 
 def _escape_regex(value: str) -> str:
     return re.escape(value)
+
+def _escape_tag_value(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    value = str(value)
+    value = value.replace("\\", "\\\\")
+    value = value.replace(",", "\\,")
+    value = value.replace("=", "\\=")
+    value = value.replace(" ", "\\ ")
+    return value
+
+
+def _escape_measurement(value: str) -> str:
+    if not value:
+        return "metric"
+    value = str(value)
+    value = value.replace("\\", "\\\\")
+    value = value.replace(",", "\\,")
+    value = value.replace(" ", "\\ ")
+    return value
+
+
+def _build_event_line(
+    event_id: str,
+    system_id: str,
+    node_id: Optional[str],
+    deployment_id: Optional[str],
+    location: Optional[str],
+    active: int,
+    ts_ns: int,
+) -> Optional[str]:
+    if not event_id or not system_id:
+        return None
+    tags = [
+        f"event_id={_escape_tag_value(event_id)}",
+        f"system_id={_escape_tag_value(system_id)}",
+        f"location={_escape_tag_value(location or '-')}",
+    ]
+    cleaned_node_id = _clean_label_value(node_id, PLACEHOLDER_NODE_IDS)
+    cleaned_deployment_id = _clean_label_value(deployment_id, PLACEHOLDER_DEPLOYMENT_IDS)
+    if cleaned_node_id:
+        tags.append(f"node_id={_escape_tag_value(cleaned_node_id)}")
+    if cleaned_deployment_id:
+        tags.append(f"deployment_id={_escape_tag_value(cleaned_deployment_id)}")
+    return (
+        f"{_escape_measurement('ovr_event')},"
+        + ",".join(tags)
+        + f" active={int(active)}i {ts_ns}"
+    )
+
+
+def _vm_write_lines(lines: List[str]) -> tuple[bool, str]:
+    if not lines:
+        return False, "no lines to write"
+    if not VM_WRITE_URL:
+        return False, "vm write url not configured"
+    url = VM_WRITE_URL.rstrip("/")
+    payload = "\n".join(lines)
+    try:
+        resp = requests.post(
+            url,
+            data=payload.encode("utf-8"),
+            headers={"Content-Type": "text/plain"},
+            timeout=VM_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        return False, f"vm write error: {exc}"
+    if resp.status_code >= 300:
+        return False, f"vm write failed: {resp.status_code}"
+    return True, ""
 
 _LABEL_UNESCAPE_RE = re.compile(r"\\([ ,=\\])")
 
@@ -1346,9 +1624,26 @@ def _list_report_event_ids() -> List[Dict[str, Any]]:
 
 def _list_report_events() -> List[Dict[str, Any]]:
     events_by_id: Dict[str, Dict[str, Any]] = {}
+    for event in _list_event_registry("all"):
+        events_by_id[event["event_id"]] = {
+            "event_id": event["event_id"],
+            "event_name": event["event_name"],
+            "name": event["event_name"],
+            "status": _event_registry_status(event),
+            "created_at": event["created_at"],
+            "started_at": event["started_at"],
+            "ended_at": event["ended_at"],
+            "has_reports": False,
+            "report_nodes": 0,
+            "latest_report_at": None,
+        }
+
     for event in _list_events("all"):
+        if event["event_id"] in events_by_id:
+            continue
         events_by_id[event["event_id"]] = {
             **event,
+            "event_name": event.get("name"),
             "has_reports": False,
             "report_nodes": 0,
             "latest_report_at": None,
@@ -1709,12 +2004,14 @@ def _map_tiles_total(provider: str, deployment_ids: Optional[List[str]]) -> tupl
             continue
         vm_ok = True
         if not result:
-            return 0, True
+            continue
         value = _value_to_float(result[0].get("value"))
         if value is None:
             continue
         return int(value), True
-    return None, vm_ok
+    if vm_ok:
+        return 0, True
+    return None, False
 
 
 def _load_manual_locations() -> Dict[str, Dict[str, Any]]:
@@ -2135,6 +2432,21 @@ def _load_nodes(
     return _finalize_nodes(nodes, manual_locations)
 
 
+def _nodes_by_node_id(nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    for node in nodes:
+        node_id = _clean_label_value(node.get("node_id"), PLACEHOLDER_NODE_IDS)
+        if not node_id:
+            continue
+        current = result.get(node_id)
+        if not current:
+            result[node_id] = node
+            continue
+        if current.get("is_logger") and not node.get("is_logger"):
+            result[node_id] = node
+    return result
+
+
 def _load_active_events(deployment_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     selector = _build_selector(deployment_ids=deployment_ids)
     lookback = f"{LOOKBACK_SECONDS}s"
@@ -2457,15 +2769,92 @@ def api_nodes() -> Any:
 def api_events() -> Any:
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
-        name = str(payload.get("name", "")).strip()
+        raw_name = payload.get("event_name") or payload.get("name")
+        name = _clean_event_name(raw_name)
         if not name:
-            return jsonify({"error": "name required"}), 400
-        event = _create_event(name)
-        return jsonify(event), 201
+            return jsonify({"error": "event_name required"}), 400
+        started_at_raw = payload.get("started_at")
+        started_at = None
+        if started_at_raw is not None:
+            started_at = _parse_event_timestamp(started_at_raw)
+            if started_at is None:
+                return jsonify({"error": "started_at invalid"}), 400
+        event, existing = _create_event_registry_entry(name, started_at)
+        if existing:
+            year = datetime.now().year
+            suggested = f"{name} {year}"
+            return jsonify(
+                {
+                    "error": "event_name_exists",
+                    "existing": {
+                        "event_id": existing["event_id"],
+                        "event_name": existing["event_name"],
+                        "created_at": existing["created_at"],
+                        "started_at": existing.get("started_at"),
+                    },
+                    "suggested": {"event_name": suggested},
+                }
+            ), 409
+        if not event:
+            return jsonify({"error": "event_name required"}), 400
+        response = {
+            "event_id": event["event_id"],
+            "event_name": event["event_name"],
+            "name": event["event_name"],
+            "created_at": event["created_at"],
+            "started_at": event["started_at"],
+            "ended_at": event["ended_at"],
+            "status": "active",
+        }
+        return jsonify(response), 201
 
-    status = str(request.args.get("status", "active")).strip().lower()
-    events = _list_events(status)
+    deployment_ids = _parse_deployment_filter()
+    events = _load_active_events(deployment_ids if deployment_ids else None)
+    registry = _event_registry_lookup([event["event_id"] for event in events if event.get("event_id")])
+    for event in events:
+        event_id = event.get("event_id")
+        info = registry.get(event_id) if event_id else None
+        if info:
+            event["event_name"] = info["event_name"]
+            event["name"] = info["event_name"]
+            event["created_at"] = info["created_at"]
+            event["started_at"] = info["started_at"]
+            event["ended_at"] = info["ended_at"]
+        else:
+            event["event_name"] = event_id
+            event["name"] = event_id
+        event["status"] = "active"
     resp = jsonify({"events": events})
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/events/create", methods=["POST"])
+def api_events_create() -> Any:
+    return api_events()
+
+
+@app.route("/api/events/registry", methods=["GET"])
+def api_events_registry() -> Any:
+    status = str(request.args.get("status", "all")).strip().lower()
+    event_id = str(request.args.get("event_id", "")).strip()
+    if status not in {"active", "ended", "all"}:
+        status = "all"
+    events = _list_event_registry(status=status, event_id=event_id or None)
+    payload = []
+    for event in events:
+        payload.append(
+            {
+                "event_id": event["event_id"],
+                "event_name": event["event_name"],
+                "created_at": event["created_at"],
+                "started_at": event["started_at"],
+                "ended_at": event["ended_at"],
+                "status": _event_registry_status(event),
+            }
+        )
+    resp = jsonify({"events": payload})
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
@@ -2484,10 +2873,130 @@ def api_event_detail(event_id: str) -> Any:
 
 @app.route("/api/events/<event_id>/end", methods=["POST"])
 def api_event_end(event_id: str) -> Any:
-    event = _end_event(event_id)
+    event = _get_event_registry(event_id)
+    if not event:
+        legacy_event = _end_event(event_id)
+        if legacy_event:
+            return jsonify(legacy_event)
+        return jsonify({"error": "event not found"}), 404
+    ended_at = _event_timestamp()
+    nodes = _load_nodes(event_ids=[event_id])
+    ts_ns = int(ended_at * 1_000_000_000)
+    lines: List[str] = []
+    seen: set[tuple[str, Optional[str], Optional[str]]] = set()
+    for node in nodes:
+        system_id = node.get("host_system_id") or node.get("system_id")
+        node_id = _clean_label_value(node.get("node_id"), PLACEHOLDER_NODE_IDS)
+        deployment_id = _clean_label_value(node.get("deployment_id"), PLACEHOLDER_DEPLOYMENT_IDS)
+        if not system_id:
+            continue
+        key = (system_id, node_id, deployment_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        line = _build_event_line(
+            event_id,
+            system_id,
+            node_id,
+            deployment_id,
+            node.get("location"),
+            0,
+            ts_ns,
+        )
+        if line:
+            lines.append(line)
+    if lines:
+        ok, error = _vm_write_lines(lines)
+        if not ok:
+            return jsonify({"error": "vm_write_failed", "detail": error}), 502
+    _end_event_registry(event_id, ended_at)
+    _mark_legacy_event_ended(event_id, ended_at)
+    event["ended_at"] = ended_at
+    payload = {
+        "event_id": event["event_id"],
+        "event_name": event["event_name"],
+        "name": event["event_name"],
+        "created_at": event["created_at"],
+        "started_at": event["started_at"],
+        "ended_at": event["ended_at"],
+        "status": "ended",
+    }
+    return jsonify(payload)
+
+
+@app.route("/api/events/<event_id>/add_nodes", methods=["POST"])
+def api_event_add_nodes_bulk(event_id: str) -> Any:
+    payload = request.get_json(silent=True) or {}
+    node_ids = payload.get("node_ids") or []
+    if isinstance(node_ids, str):
+        node_ids = [node_ids]
+    if not isinstance(node_ids, list):
+        return jsonify({"error": "node_ids must be a list"}), 400
+    node_ids = [str(value).strip() for value in node_ids if str(value).strip()]
+    if not node_ids:
+        return jsonify({"error": "node_ids required"}), 400
+
+    event = _get_event_registry(event_id)
     if not event:
         return jsonify({"error": "event not found"}), 404
-    return jsonify(event)
+
+    nodes = _load_nodes()
+    nodes_by_id = _nodes_by_node_id(nodes)
+    started_at = event.get("started_at") or _event_timestamp()
+    ts_ns = int(started_at * 1_000_000_000)
+    location = _clean_event_name(payload.get("location"))
+
+    lines: List[str] = []
+    added: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for node_id in node_ids:
+        resolved = nodes_by_id.get(node_id)
+        if not resolved:
+            missing.append(node_id)
+            continue
+        system_id = resolved.get("host_system_id") or resolved.get("system_id")
+        deployment_id = resolved.get("deployment_id")
+        line = _build_event_line(
+            event_id,
+            system_id,
+            node_id,
+            deployment_id,
+            location or resolved.get("location"),
+            1,
+            ts_ns,
+        )
+        if not line:
+            missing.append(node_id)
+            continue
+        lines.append(line)
+        added.append(
+            {
+                "node_id": node_id,
+                "system_id": system_id,
+                "deployment_id": _clean_label_value(
+                    deployment_id, PLACEHOLDER_DEPLOYMENT_IDS
+                ),
+            }
+        )
+
+    if not lines:
+        return jsonify({"error": "no_nodes_found", "missing": missing}), 404
+
+    ok, error = _vm_write_lines(lines)
+    if not ok:
+        return jsonify({"error": "vm_write_failed", "detail": error}), 502
+
+    for entry in added:
+        _add_event_node(event_id, entry["node_id"])
+
+    return jsonify(
+        {
+            "event_id": event_id,
+            "added": added,
+            "missing": missing,
+            "started_at": started_at,
+        }
+    )
 
 
 @app.route("/api/events/<event_id>/nodes", methods=["POST"])
@@ -2559,7 +3068,14 @@ def api_reports_monthly() -> Any:
             continue
         report["report_url"] = f"{base_url}/api/reports/monthly/{month_key}/{node_key}"
         report["download_url"] = f"{base_url}/api/reports/monthly/{month_key}/{node_key}?download=1"
-    resp = jsonify({"month": month_key, "reports": reports})
+    payload: Dict[str, Any] = {"month": month_key, "reports": reports}
+    if not reports:
+        payload["warning"] = (
+            "No monthly reports found. Check FLEET_METRIC_SUFFIX and stream aggregation."
+        )
+        payload["metric_suffix"] = METRIC_SUFFIX
+        payload["metric_names"] = [_metric_name(name) for name in _MONTHLY_METRICS.values()]
+    resp = jsonify(payload)
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
