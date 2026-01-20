@@ -9,6 +9,7 @@ const EVENT_STALE_SECONDS = 300;
 const MAP_USAGE_STORAGE_KEY = 'ovr_fleet_map_usage_v1';
 const MAP_PROVIDER_STORAGE_KEY = 'ovr_fleet_map_provider_v1';
 const MAP_STATUS_POLL_MS = 15000;
+const MAP_USAGE_FLUSH_MS = 30000;
 const PLACEHOLDER_DEPLOYMENT_IDS = new Set(['__DEPLOYMENT_ID__', '__DEPLOYEMENT_ID__']);
 
 const isPlaceholderDeployment = (value) => {
@@ -95,7 +96,8 @@ const monthKeyUtc = () => new Date().toISOString().slice(0, 7);
 
 const buildEmptyUsage = (monthKey) => ({
   monthKey,
-  counts: { mapbox: 0, esri: 0 }
+  counts: { mapbox: 0, esri: 0 },
+  pending: { mapbox: 0, esri: 0 }
 });
 
 const loadMapUsage = () => {
@@ -110,6 +112,10 @@ const loadMapUsage = () => {
       counts: {
         mapbox: Number(parsed.counts?.mapbox || 0),
         esri: Number(parsed.counts?.esri || 0)
+      },
+      pending: {
+        mapbox: Number(parsed.pending?.mapbox || 0),
+        esri: Number(parsed.pending?.esri || 0)
       }
     };
   } catch (err) {
@@ -145,6 +151,12 @@ const formatReportTimestamp = (value) => {
   return new Date(ms).toLocaleString();
 };
 
+const formatEventTimestamp = (value) => {
+  const ms = Number(value) * 1000;
+  if (!Number.isFinite(ms) || ms <= 0) return '--';
+  return new Date(ms).toLocaleString();
+};
+
 const buildNodesUrl = (deploymentIds, eventId) => {
   const params = new URLSearchParams();
   if (deploymentIds && deploymentIds.length) {
@@ -159,15 +171,13 @@ const buildNodesUrl = (deploymentIds, eventId) => {
   return `${API_BASE}/nodes?${params.toString()}`;
 };
 
-const buildEventsUrl = (deploymentIds) => {
-  const params = new URLSearchParams();
-  if (deploymentIds && deploymentIds.length) {
-    deploymentIds.forEach((id) => params.append('deployment_id', id));
-  }
-  if ([...params.keys()].length === 0) {
-    return `${API_BASE}/events`;
-  }
-  return `${API_BASE}/events?${params.toString()}`;
+const buildNodeUrl = (nodeId, eventId) => {
+  if (!nodeId) return '';
+  const host = window.location.host;
+  const baseDomain = host.startsWith('map.') ? host.slice(4) : host;
+  const baseUrl = `https://${nodeId}.${baseDomain}`;
+  if (!eventId) return baseUrl;
+  return `${baseUrl}?event_id=${encodeURIComponent(eventId)}`;
 };
 
 const getStatusClass = (node) => {
@@ -396,11 +406,13 @@ export default function App() {
   const [selectedDeployments, setSelectedDeployments] = useState([]);
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState('');
-  const [reportMonths, setReportMonths] = useState([]);
+  const [eventNodeInput, setEventNodeInput] = useState('');
+  const [aliasNodeInput, setAliasNodeInput] = useState('');
+  const [aliasTempEventInput, setAliasTempEventInput] = useState('');
   const [reportEvents, setReportEvents] = useState([]);
-  const [selectedReportMonth, setSelectedReportMonth] = useState('');
   const [selectedReportEvent, setSelectedReportEvent] = useState('');
   const [reportItems, setReportItems] = useState([]);
+  const [reportAggregate, setReportAggregate] = useState(null);
   const [reportMessage, setReportMessage] = useState('');
   const [mapStatus, setMapStatus] = useState(null);
   const [mapProviders, setMapProviders] = useState({
@@ -434,9 +446,18 @@ export default function App() {
   const lastRecommendedRef = useRef(null);
 
   const pollSeconds = POLL_INTERVALS[pollIndex] || POLL_INTERVALS[POLL_INTERVALS.length - 1];
+  const selectedEventDetail = useMemo(
+    () => events.find((event) => event.event_id === selectedEvent) || null,
+    [events, selectedEvent]
+  );
+  const activeEventsCount = useMemo(
+    () => events.filter((event) => event.status === 'active').length,
+    [events]
+  );
   const mapBlocked = mapStatus?.blocked || {};
   const mapFleet = mapStatus?.fleet || {};
   const mapPct = mapStatus?.pct || {};
+  const satelliteAllowed = mapStatus?.satelliteAllowed !== false;
   const mapMonthLabel = formatMonthKey(mapStatus?.month_key);
   const guardrailPct = mapStatus?.thresholds?.guardrailPct ?? 0.95;
   const guardrailPctLabel = Math.round(guardrailPct * 100);
@@ -473,6 +494,16 @@ export default function App() {
   }, [mapUsage]);
 
   useEffect(() => {
+    const handleUnload = () => flushMapUsage(true);
+    const interval = setInterval(() => flushMapUsage(false), MAP_USAGE_FLUSH_MS);
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, [selectedDeployments]);
+
+  useEffect(() => {
     activeProviderRef.current = activeProvider;
     try {
       window.localStorage.setItem(MAP_PROVIDER_STORAGE_KEY, activeProvider);
@@ -500,6 +531,16 @@ export default function App() {
   };
 
   const visibleNodes = useMemo(() => nodes.filter(hasFreshSignal), [nodes]);
+  const liveEventNodes = useMemo(() => {
+    if (!selectedEvent) return [];
+    const ids = new Set();
+    nodes.forEach((node) => {
+      if (node.event_id === selectedEvent && node.node_id) {
+        ids.add(node.node_id);
+      }
+    });
+    return [...ids];
+  }, [nodes, selectedEvent]);
 
   const getGroupKey = (node) =>
     node.node_id || node.host_system_id || node.system_id || 'unknown';
@@ -677,7 +718,7 @@ export default function App() {
 
   const fetchNodes = async () => {
     try {
-      const effectiveEvent = events.length === 0 ? '' : selectedEvent;
+      const effectiveEvent = selectedEvent || '';
       const resp = await fetch(buildNodesUrl(selectedDeployments, effectiveEvent), { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load nodes');
       const payload = await resp.json();
@@ -708,12 +749,12 @@ export default function App() {
 
   const fetchEvents = async () => {
     try {
-      const resp = await fetch(buildEventsUrl(selectedDeployments), { cache: 'no-store' });
+      const resp = await fetch(`${API_BASE}/events?status=all`, { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load events');
       const payload = await resp.json();
       const items = Array.isArray(payload.events) ? payload.events : [];
       const eventIds = items.map((item) => item.event_id).filter(Boolean);
-      setEvents(eventIds);
+      setEvents(items);
       if (eventIds.length === 0) {
         if (selectedEvent) setSelectedEvent('');
       } else if (selectedEvent && !eventIds.includes(selectedEvent)) {
@@ -729,64 +770,155 @@ export default function App() {
 
   const fetchReportSummary = async () => {
     try {
-      const resp = await fetch(`${API_BASE}/reports`, { cache: 'no-store' });
+      const resp = await fetch(`${API_BASE}/reports/events`, { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load reports');
       const payload = await resp.json();
-      setReportMonths(Array.isArray(payload.months) ? payload.months : []);
-      setReportEvents(Array.isArray(payload.events) ? payload.events : []);
+      const items = Array.isArray(payload.events) ? payload.events : [];
+      const filtered = items.filter((entry) => entry.has_reports);
+      setReportEvents(filtered);
+      const ids = filtered.map((entry) => entry.event_id).filter(Boolean);
+      if (selectedReportEvent && !ids.includes(selectedReportEvent)) {
+        setSelectedReportEvent('');
+      }
       setReportMessage('');
     } catch (err) {
-      setReportMonths([]);
       setReportEvents([]);
       setReportMessage('Reports unavailable.');
     }
   };
 
-  const fetchMonthlyReports = async (monthKey) => {
+  const fetchEventReports = async (eventId) => {
     try {
-      const resp = await fetch(`${API_BASE}/reports/monthly?month=${encodeURIComponent(monthKey)}`, {
+      const resp = await fetch(`${API_BASE}/reports/${encodeURIComponent(eventId)}`, {
         cache: 'no-store',
       });
-      if (!resp.ok) throw new Error('Failed to load monthly reports');
+      if (!resp.ok) throw new Error('Failed to load event reports');
       const payload = await resp.json();
       const reports = Array.isArray(payload.reports) ? payload.reports : [];
+      const aggregate = payload.aggregate || null;
       setReportItems(
         reports.map((entry) => ({
           id: entry.node_key || entry.system_id || entry.node_id,
           label: entry.node_id || entry.system_id || entry.node_key || 'Unknown node',
           meta: `Updated ${formatReportTimestamp(entry.generated_at)}`,
           reportUrl: entry.report_html_url || entry.report_url,
-          downloadUrl: entry.download_url
+          downloadUrl: entry.report_json_url || entry.download_url
         }))
       );
-      setReportMessage(reports.length ? '' : 'No monthly reports yet.');
-    } catch (err) {
-      setReportItems([]);
-      setReportMessage('Unable to load monthly reports.');
-    }
-  };
-
-  const fetchEventReports = async (eventId) => {
-    try {
-      const resp = await fetch(`${API_BASE}/reports/event?event_id=${encodeURIComponent(eventId)}`, {
-        cache: 'no-store',
-      });
-      if (!resp.ok) throw new Error('Failed to load event reports');
-      const payload = await resp.json();
-      const reports = Array.isArray(payload.reports) ? payload.reports : [];
-      setReportItems(
-        reports.map((entry) => ({
-          id: entry.node_key || entry.system_id || entry.node_id,
-          label: entry.node_id || entry.system_id || entry.node_key || 'Unknown node',
-          meta: `Updated ${formatReportTimestamp(entry.generated_at)}`,
-          reportUrl: entry.report_url,
-          downloadUrl: entry.download_url
-        }))
-      );
+      setReportAggregate(aggregate && aggregate.available ? aggregate : null);
       setReportMessage(reports.length ? '' : 'No event reports yet.');
     } catch (err) {
       setReportItems([]);
+      setReportAggregate(null);
       setReportMessage('Unable to load event reports.');
+    }
+  };
+
+  const createEvent = async () => {
+    const name = window.prompt('Event name');
+    if (!name) return;
+    try {
+      const resp = await fetch(`${API_BASE}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      if (!resp.ok) throw new Error('Failed to create event');
+      const payload = await resp.json();
+      await fetchEvents();
+      if (payload?.event_id) {
+        setSelectedEvent(payload.event_id);
+      }
+      setStatusMessage(`Event created: ${payload?.name || payload?.event_id || name}`);
+    } catch (err) {
+      setStatusMessage('Unable to create event.');
+    }
+  };
+
+  const endEvent = async () => {
+    if (!selectedEvent) return;
+    if (!window.confirm('End this event?')) return;
+    try {
+      const resp = await fetch(`${API_BASE}/events/${encodeURIComponent(selectedEvent)}/end`, {
+        method: 'POST'
+      });
+      if (!resp.ok) throw new Error('Failed to end event');
+      await fetchEvents();
+      setStatusMessage('Event ended.');
+    } catch (err) {
+      setStatusMessage('Unable to end event.');
+    }
+  };
+
+  const addNodeToEvent = async () => {
+    const nodeId = eventNodeInput.trim();
+    if (!selectedEvent || !nodeId) {
+      setStatusMessage('Select an event and node id to add.');
+      return;
+    }
+    try {
+      const resp = await fetch(
+        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/nodes`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ node_id: nodeId })
+        }
+      );
+      if (!resp.ok) throw new Error('Failed to add node');
+      setEventNodeInput('');
+      await fetchEvents();
+      const nodeUrl = buildNodeUrl(nodeId, selectedEvent);
+      if (nodeUrl && window.confirm('Node added. Open node UI to assign loggers?')) {
+        window.open(nodeUrl, '_blank', 'noreferrer');
+      }
+      setStatusMessage(`Node ${nodeId} added to event.`);
+    } catch (err) {
+      setStatusMessage('Unable to add node to event.');
+    }
+  };
+
+  const endNodeForEvent = async (nodeId) => {
+    if (!selectedEvent || !nodeId) return;
+    if (!window.confirm(`End event for ${nodeId}?`)) return;
+    try {
+      const resp = await fetch(
+        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/nodes/${encodeURIComponent(nodeId)}/end`,
+        { method: 'POST' }
+      );
+      if (!resp.ok) throw new Error('Failed to end node');
+      await fetchEvents();
+      setStatusMessage(`Node ${nodeId} ended for event.`);
+    } catch (err) {
+      setStatusMessage('Unable to end node for event.');
+    }
+  };
+
+  const mergeTempEvent = async () => {
+    const nodeId = aliasNodeInput.trim();
+    const tempEventId = aliasTempEventInput.trim();
+    if (!selectedEvent || !nodeId || !tempEventId) {
+      setStatusMessage('Select an event and enter node + temp event id.');
+      return;
+    }
+    if (!window.confirm('Merge temp event into selected event?')) return;
+    try {
+      const resp = await fetch(
+        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/aliases`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ node_id: nodeId, temp_event_id: tempEventId })
+        }
+      );
+      if (!resp.ok) throw new Error('Failed to merge temp event');
+      setAliasNodeInput('');
+      setAliasTempEventInput('');
+      await fetchEvents();
+      await fetchReportSummary();
+      setStatusMessage(`Merged temp event ${tempEventId} for ${nodeId}.`);
+    } catch (err) {
+      setStatusMessage('Unable to merge temp event.');
     }
   };
 
@@ -835,8 +967,55 @@ export default function App() {
         counts: {
           ...base.counts,
           [provider]: (base.counts?.[provider] || 0) + 1
+        },
+        pending: {
+          ...base.pending,
+          [provider]: (base.pending?.[provider] || 0) + 1
         }
       };
+    });
+  };
+
+  const flushMapUsage = async (useBeacon = false) => {
+    const usage = mapUsageRef.current;
+    if (!usage) return;
+    const entries = Object.entries(usage.pending || {}).filter(([, count]) => count > 0);
+    if (entries.length === 0) return;
+
+    const deploymentId = selectedDeployments.length === 1 ? selectedDeployments[0] : '';
+    const payloadBase = {
+      node_id: 'fleet-map',
+      month: usage.monthKey,
+      deployment_id: deploymentId || undefined
+    };
+
+    if (useBeacon && navigator.sendBeacon) {
+      entries.forEach(([provider, count]) => {
+        const payload = JSON.stringify({ provider, delta: count, ...payloadBase });
+        navigator.sendBeacon('/api/tiles/usage', new Blob([payload], { type: 'application/json' }));
+      });
+      return;
+    }
+
+    const nextPending = { ...usage.pending };
+    for (const [provider, count] of entries) {
+      try {
+        const resp = await fetch('/api/tiles/usage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, delta: count, ...payloadBase })
+        });
+        if (resp.ok) {
+          nextPending[provider] = 0;
+        }
+      } catch (err) {
+        // Keep pending count for retry.
+      }
+    }
+
+    setMapUsage((prev) => {
+      if (prev.monthKey !== usage.monthKey) return prev;
+      return { ...prev, pending: nextPending };
     });
   };
 
@@ -863,6 +1042,7 @@ export default function App() {
         setMapUsage(buildEmptyUsage(data.month_key));
       }
       const recommended = data.recommendedProvider || data.preferredProvider;
+      const allowTiles = data.satelliteAllowed !== false;
       const stored = window.localStorage.getItem(MAP_PROVIDER_STORAGE_KEY);
       const nextProvider = recommended || stored;
       const bothBlocked = data.blocked?.mapbox && data.blocked?.esri;
@@ -874,7 +1054,8 @@ export default function App() {
         nextProvider &&
         nextProvider !== activeProviderRef.current &&
         !bothBlocked &&
-        !cloudUnavailable
+        !cloudUnavailable &&
+        allowTiles
       ) {
         setActiveProvider(nextProvider);
         if (activeProviderRef.current) {
@@ -893,7 +1074,10 @@ export default function App() {
 
   const selectMapProvider = async (provider) => {
     if (!provider || provider === activeProviderRef.current) return;
-    const label = mapProviders?.[provider]?.label || provider;
+    if (!satelliteAllowed) {
+      setStatusMessage('Satellite imagery disabled due to budget limits.');
+      return;
+    }
     const fallback = provider === 'mapbox' ? 'esri' : 'mapbox';
     const blocked = mapBlocked?.[provider];
     const fallbackBlocked = mapBlocked?.[fallback];
@@ -980,7 +1164,16 @@ export default function App() {
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !mapProviders) return;
+    if (!map) return;
+    if (!satelliteAllowed) {
+      if (baseLayerRef.current) {
+        baseLayerRef.current.off('tileloadstart');
+        map.removeLayer(baseLayerRef.current);
+        baseLayerRef.current = null;
+      }
+      return;
+    }
+    if (!mapProviders) return;
     const provider =
       mapProviders[activeProvider] || mapProviders.esri || Object.values(mapProviders)[0];
     if (!provider || !provider.url) return;
@@ -1000,7 +1193,7 @@ export default function App() {
     layer.on('tileloadstart', () => incrementMapUsage(provider.id || activeProvider));
     layer.addTo(map);
     baseLayerRef.current = layer;
-  }, [mapProviders, activeProvider]);
+  }, [mapProviders, activeProvider, satelliteAllowed]);
 
   useEffect(() => {
     fetchMapStatus();
@@ -1019,21 +1212,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    fetchEvents();
+    const interval = setInterval(fetchEvents, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
     fetchNodes();
   }, [selectedDeployments, selectedEvent]);
 
   useEffect(() => {
-    if (selectedReportMonth) {
-      fetchMonthlyReports(selectedReportMonth);
-      return;
-    }
     if (selectedReportEvent) {
       fetchEventReports(selectedReportEvent);
       return;
     }
     setReportItems([]);
+    setReportAggregate(null);
     setReportMessage('');
-  }, [selectedReportMonth, selectedReportEvent]);
+  }, [selectedReportEvent]);
 
   useEffect(() => {
     if (pollTimeoutRef.current) {
@@ -1248,25 +1444,134 @@ export default function App() {
           </details>
         </div>
 
-        {events.length > 0 ? (
-          <div className="panel">
-            <div className="panel-title">Active Events</div>
-            <div className="event-select">
-              <select
-                value={selectedEvent}
-                onChange={(event) => setSelectedEvent(event.target.value)}
-              >
-                <option value="">All events</option>
-                {events.map((eventId) => (
-                  <option key={eventId} value={eventId}>
-                    {eventId}
+        <div className="panel">
+          <div className="panel-title">Events</div>
+          <div className="event-select">
+            <select
+              value={selectedEvent}
+              onChange={(event) => setSelectedEvent(event.target.value)}
+            >
+              <option value="">All events</option>
+              {events.map((event) => {
+                const label = event.name || event.event_id;
+                const status = event.status === 'ended' ? 'ended' : 'active';
+                return (
+                  <option key={event.event_id} value={event.event_id}>
+                    {label} ({status})
                   </option>
-                ))}
-              </select>
-              <div className="event-meta">{`${events.length} active`}</div>
-            </div>
+                );
+              })}
+            </select>
+            <div className="event-meta">{`${activeEventsCount} active / ${events.length} total`}</div>
           </div>
-        ) : null}
+          <div className="event-actions">
+            <button className="btn" onClick={createEvent} type="button">
+              Start Event
+            </button>
+            <button
+              className="btn ghost"
+              onClick={endEvent}
+              type="button"
+              disabled={!selectedEvent || selectedEventDetail?.status === 'ended'}
+            >
+              End Event
+            </button>
+          </div>
+          {selectedEventDetail ? (
+            <div className="event-details">
+              <div className="event-row">
+                <strong>Name:</strong> {selectedEventDetail.name || selectedEventDetail.event_id}
+              </div>
+              <div className="event-row">
+                <strong>ID:</strong> {selectedEventDetail.event_id}
+              </div>
+              <div className="event-row">
+                <strong>Status:</strong> {selectedEventDetail.status}
+              </div>
+              <div className="event-row">
+                <strong>Created:</strong> {formatEventTimestamp(selectedEventDetail.created_at)}
+              </div>
+              {selectedEventDetail.ended_at ? (
+                <div className="event-row">
+                  <strong>Ended:</strong> {formatEventTimestamp(selectedEventDetail.ended_at)}
+                </div>
+              ) : null}
+              <div className="event-row">
+                <strong>Live nodes:</strong>{' '}
+                {liveEventNodes.length ? liveEventNodes.join(', ') : 'None'}
+              </div>
+              <div className="event-node-add">
+                <input
+                  type="text"
+                  value={eventNodeInput}
+                  onChange={(event) => setEventNodeInput(event.target.value)}
+                  placeholder="node_id"
+                />
+                <button className="btn ghost" type="button" onClick={addNodeToEvent}>
+                  Add node
+                </button>
+              </div>
+              <div className="event-nodes">
+                {selectedEventDetail.nodes && selectedEventDetail.nodes.length > 0 ? (
+                  selectedEventDetail.nodes.map((node) => {
+                    const nodeUrl = buildNodeUrl(node.node_id, selectedEventDetail.event_id);
+                    const ended = Boolean(node.ended_at);
+                    return (
+                      <div key={node.node_id} className={`event-node ${ended ? 'ended' : ''}`}>
+                        <div>
+                          <div className="event-node-title">{node.node_id}</div>
+                          <div className="event-node-meta">
+                            Joined {formatEventTimestamp(node.joined_at)}
+                            {ended ? ` · Ended ${formatEventTimestamp(node.ended_at)}` : ''}
+                          </div>
+                        </div>
+                        <div className="event-node-actions">
+                          {nodeUrl ? (
+                            <a className="link" href={nodeUrl} target="_blank" rel="noreferrer">
+                              Open node
+                            </a>
+                          ) : null}
+                          <button
+                            className="btn ghost"
+                            type="button"
+                            onClick={() => endNodeForEvent(node.node_id)}
+                            disabled={ended}
+                          >
+                            End node
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="empty">No nodes added yet.</div>
+                )}
+              </div>
+              <div className="event-alias">
+                <div className="event-row">
+                  <strong>Merge temp event</strong>
+                </div>
+                <div className="event-alias-inputs">
+                  <input
+                    type="text"
+                    value={aliasNodeInput}
+                    onChange={(event) => setAliasNodeInput(event.target.value)}
+                    placeholder="node_id"
+                  />
+                  <input
+                    type="text"
+                    value={aliasTempEventInput}
+                    onChange={(event) => setAliasTempEventInput(event.target.value)}
+                    placeholder="temp_event_id"
+                  />
+                  <button className="btn ghost" type="button" onClick={mergeTempEvent}>
+                    Merge
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
 
         <div className="panel">
           <div className="panel-title">On Map</div>
@@ -1559,53 +1864,65 @@ export default function App() {
       <main className="map-wrap">
         <div className="report-filters">
           <label>
-            <span>Month</span>
-            <select
-              value={selectedReportMonth}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSelectedReportMonth(value);
-                if (value) setSelectedReportEvent('');
-              }}
-              disabled={Boolean(selectedReportEvent)}
-            >
-              <option value="">Select month</option>
-              {reportMonths.map((month) => (
-                <option key={month} value={month}>
-                  {formatMonthKey(month)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
             <span>Event</span>
             <select
               value={selectedReportEvent}
               onChange={(event) => {
                 const value = event.target.value;
                 setSelectedReportEvent(value);
-                if (value) setSelectedReportMonth('');
               }}
-              disabled={Boolean(selectedReportMonth)}
             >
               <option value="">Select event</option>
-              {reportEvents.map((entry) => (
-                <option key={entry.event_id} value={entry.event_id}>
-                  {entry.event_id}
-                </option>
-              ))}
+              {reportEvents.map((entry) => {
+                const label = entry.name || entry.event_id;
+                const suffix = entry.report_nodes ? ` (${entry.report_nodes})` : '';
+                return (
+                  <option key={entry.event_id} value={entry.event_id}>
+                    {label}
+                    {suffix}
+                  </option>
+                );
+              })}
             </select>
           </label>
-          <div className="report-meta">
-            {reportMonths.length} months, {reportEvents.length} events
-          </div>
+          <div className="report-meta">{reportEvents.length} events with reports</div>
         </div>
         <div className="report-panel">
           <div className="report-panel-title">Reports</div>
+          {reportAggregate ? (
+            <div className="report-aggregate">
+              <div>
+                <div className="report-title">Aggregate event report</div>
+                <div className="report-sub">Combined view across all node uploads.</div>
+              </div>
+              <div className="report-actions">
+                {reportAggregate.report_html_url ? (
+                  <a
+                    className="link"
+                    href={reportAggregate.report_html_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open HTML
+                  </a>
+                ) : null}
+                {reportAggregate.report_json_url ? (
+                  <a
+                    className="link"
+                    href={reportAggregate.report_json_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Download JSON
+                  </a>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <div className="report-list">
             {reportMessage ? <div className="empty">{reportMessage}</div> : null}
             {!reportMessage && reportItems.length === 0 ? (
-              <div className="empty">Select a month or event to view reports.</div>
+              <div className="empty">Select an event to view reports.</div>
             ) : null}
             {reportItems.map((item) => (
               <div key={item.id} className="report-row">
@@ -1616,12 +1933,12 @@ export default function App() {
                 <div className="report-actions">
                   {item.reportUrl ? (
                     <a className="link" href={item.reportUrl} target="_blank" rel="noreferrer">
-                      Open
+                      Open HTML
                     </a>
                   ) : null}
                   {item.downloadUrl ? (
                     <a className="link" href={item.downloadUrl} target="_blank" rel="noreferrer">
-                      Download
+                      Download JSON
                     </a>
                   ) : null}
                 </div>
@@ -1634,16 +1951,18 @@ export default function App() {
             {['mapbox', 'esri'].map((provider) => {
               const label = mapProviders?.[provider]?.label || provider;
               const blocked = mapBlocked?.[provider];
-              const reason = blocked
-                ? `${guardrailPctLabel}% free tier reached for ${mapMonthLabel}`
-                : `Switch to ${label}`;
+              const reason = !satelliteAllowed
+                ? 'Satellite imagery disabled due to budget limits.'
+                : blocked
+                  ? `${guardrailPctLabel}% free tier reached for ${mapMonthLabel}`
+                  : `Switch to ${label}`;
               return (
                 <button
                   key={provider}
                   className={`map-provider-btn ${
                     activeProvider === provider ? 'active' : ''
                   } ${blocked ? 'blocked' : ''}`}
-                  disabled={blocked}
+                  disabled={blocked || !satelliteAllowed}
                   title={reason}
                   onClick={() => selectMapProvider(provider)}
                 >

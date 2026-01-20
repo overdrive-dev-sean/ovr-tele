@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
 from werkzeug.utils import secure_filename
+from urllib.parse import quote
 
 from map_tiles import (
     PROVIDERS as MAP_TILE_PROVIDERS,
@@ -34,6 +35,8 @@ from map_tiles import (
     init_map_tables,
     increment_tile_count,
     get_tile_counts,
+    get_tile_sync_totals,
+    set_tile_sync_total,
     set_preferred_provider,
     get_preferred_provider,
     build_guardrail_status,
@@ -62,6 +65,9 @@ REPORTS_PATH = os.environ.get("REPORTS_PATH", "/data/reports")
 REPORT_UPLOAD_URL = os.environ.get("REPORT_UPLOAD_URL", "").strip()
 REPORT_UPLOAD_TOKEN = os.environ.get("REPORT_UPLOAD_TOKEN", "").strip()
 REPORT_UPLOAD_TIMEOUT = float(os.environ.get("REPORT_UPLOAD_TIMEOUT", "8"))
+REPORT_UPLOAD_RETRY_INTERVAL = int(os.environ.get("REPORT_UPLOAD_RETRY_INTERVAL", "120"))
+REPORT_UPLOAD_BACKOFF_BASE = int(os.environ.get("REPORT_UPLOAD_BACKOFF_BASE", "30"))
+REPORT_UPLOAD_BACKOFF_MAX = int(os.environ.get("REPORT_UPLOAD_BACKOFF_MAX", "3600"))
 API_KEY = os.environ.get("EVENT_API_KEY", os.environ.get("API_KEY", ""))  # Optional simple API key
 API_KEY_FILE = os.environ.get("EVENT_API_KEY_FILE", os.environ.get("API_KEY_FILE", "")).strip()
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
@@ -100,6 +106,7 @@ def canonicalize_system_id(system_id: str) -> str:
 SYSTEM_ID = canonicalize_system_id(os.environ.get("SYSTEM_ID", "default-system"))
 NODE_ID = os.environ.get("NODE_ID", "").strip()
 DEPLOYMENT_ID = os.environ.get("DEPLOYMENT_ID", "").strip()
+TEMP_EVENT_PREFIX = "temp-"
 
 # Map usage guardrails
 MAPBOX_FREE_TILES_PER_MONTH = int(os.environ.get("MAPBOX_FREE_TILES_PER_MONTH", "750000"))
@@ -109,6 +116,7 @@ GUARDRAIL_LIMIT_PCT = float(os.environ.get("GUARDRAIL_LIMIT_PCT", "0.95"))
 # Cloud fleet API (optional)
 CLOUD_API_URL = os.environ.get("CLOUD_API_URL", os.environ.get("CLOUD_BASE_URL", "")).strip()
 CLOUD_API_TIMEOUT = float(os.environ.get("CLOUD_API_TIMEOUT", "4"))
+TILE_USAGE_SYNC_INTERVAL = int(os.environ.get("TILE_USAGE_SYNC_INTERVAL", "60"))
 
 # GX Device SSH configuration
 GX_HOST = os.environ.get("GX_HOST", "192.168.100.2")
@@ -288,6 +296,24 @@ def build_event_line(event_id: str, system_id: str, location: Optional[str], act
     if DEPLOYMENT_ID:
         tags.append(f"deployment_id={escape_tag_value(DEPLOYMENT_ID)}")
     return f"{escape_measurement('ovr_event')}," + ",".join(tags) + f" active={int(active)}i {ts_ns}"
+
+
+def _safe_event_fragment(value: str) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
+
+
+def _is_temp_event_id(event_id: str) -> bool:
+    return bool(event_id and event_id.startswith(TEMP_EVENT_PREFIX))
+
+
+def _generate_temp_event_id(system_id: str) -> str:
+    fragment = _safe_event_fragment(NODE_ID or system_id or SYSTEM_ID or "node")
+    ts = int(time.time())
+    if not fragment:
+        fragment = "node"
+    return f"{TEMP_EVENT_PREFIX}{fragment}-{ts}"
 
 
 # ============================================================================
@@ -1505,20 +1531,14 @@ def render_report_html(report: Dict[str, Any], image_base_url: str = "/images") 
     return html
 
 
-def _upload_report_json(report: Dict[str, Any], report_html: Optional[str] = None) -> None:
+def _report_upload_backoff_seconds(attempts: int) -> int:
+    exponent = min(max(attempts, 0), 6)
+    return min(REPORT_UPLOAD_BACKOFF_MAX, REPORT_UPLOAD_BACKOFF_BASE * (2**exponent))
+
+
+def _post_report_payload(payload: Dict[str, Any]) -> bool:
     if not REPORT_UPLOAD_URL or not REPORT_UPLOAD_TOKEN:
-        return
-    payload = {
-        "report_type": "event",
-        "event_id": report.get("event_id"),
-        "generated_at": report.get("generated_at"),
-        "system_id": SYSTEM_ID or None,
-        "node_id": NODE_ID or None,
-        "deployment_id": DEPLOYMENT_ID or None,
-        "report": report,
-    }
-    if report_html:
-        payload["report_html"] = report_html
+        return False
     headers = {"X-Report-Token": REPORT_UPLOAD_TOKEN}
     try:
         resp = requests.post(
@@ -1527,12 +1547,116 @@ def _upload_report_json(report: Dict[str, Any], report_html: Optional[str] = Non
             headers=headers,
             timeout=REPORT_UPLOAD_TIMEOUT,
         )
-        if resp.status_code != 200:
-            logger.warning(
-                "Report upload failed: %s %s", resp.status_code, resp.text[:200]
-            )
     except Exception as exc:
         logger.warning(f"Report upload failed: {exc}")
+        return False
+    if resp.status_code not in (200, 201):
+        logger.warning(
+            "Report upload failed: %s %s", resp.status_code, resp.text[:200]
+        )
+        return False
+    return True
+
+
+def _queue_report_payload(payload: Dict[str, Any], error: str = "") -> None:
+    now = int(time.time())
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO report_outbox
+                (payload, created_at, updated_at, attempts, next_attempt_at, last_error)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                json.dumps(payload),
+                now,
+                now,
+                0,
+                now,
+                error,
+            ),
+        )
+        conn.commit()
+
+
+def _process_report_outbox() -> None:
+    if not REPORT_UPLOAD_URL or not REPORT_UPLOAD_TOKEN:
+        return
+    now = int(time.time())
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, payload, attempts
+            FROM report_outbox
+            WHERE next_attempt_at <= ?
+            ORDER BY id
+            LIMIT 10
+            """,
+            (now,),
+        ).fetchall()
+    for row in rows:
+        row_id = row["id"]
+        try:
+            payload = json.loads(row["payload"])
+        except Exception:
+            with get_db() as conn:
+                conn.execute("DELETE FROM report_outbox WHERE id = ?", (row_id,))
+                conn.commit()
+            continue
+        if _post_report_payload(payload):
+            with get_db() as conn:
+                conn.execute("DELETE FROM report_outbox WHERE id = ?", (row_id,))
+                conn.commit()
+        else:
+            attempts = int(row["attempts"] or 0) + 1
+            next_attempt = now + _report_upload_backoff_seconds(attempts)
+            with get_db() as conn:
+                conn.execute(
+                    """
+                    UPDATE report_outbox
+                    SET attempts = ?, updated_at = ?, next_attempt_at = ?, last_error = ?
+                    WHERE id = ?
+                    """,
+                    (attempts, now, next_attempt, "upload failed", row_id),
+                )
+                conn.commit()
+
+
+def report_upload_worker() -> None:
+    while not _heartbeat_stop.is_set():
+        try:
+            _process_report_outbox()
+        except Exception as exc:
+            logger.warning(f"Report upload retry failed: {exc}")
+        _heartbeat_stop.wait(max(REPORT_UPLOAD_RETRY_INTERVAL, 5))
+
+
+def _upload_report_json(report: Dict[str, Any], report_html: Optional[str] = None) -> None:
+    if not REPORT_UPLOAD_URL or not REPORT_UPLOAD_TOKEN:
+        return
+    event_id = report.get("event_id")
+    temp_event_id = report.get("temp_event_id") or (
+        event_id if _is_temp_event_id(event_id or "") else ""
+    )
+    event_id_original = report.get("event_id_original") or temp_event_id
+    payload = {
+        "report_type": "event",
+        "event_id": event_id,
+        "generated_at": report.get("generated_at"),
+        "system_id": SYSTEM_ID or None,
+        "node_id": NODE_ID or None,
+        "deployment_id": DEPLOYMENT_ID or None,
+        "report": report,
+    }
+    if temp_event_id:
+        payload["temp_event_id"] = temp_event_id
+    if event_id_original:
+        payload["event_id_original"] = event_id_original
+    if report_html:
+        payload["report_html"] = report_html
+    if _post_report_payload(payload):
+        return
+    _queue_report_payload(payload, "initial upload failed")
 
 
 def generate_event_report(event_id: str) -> Dict[str, Any]:
@@ -1973,6 +2097,19 @@ def init_db():
                 updated_at INTEGER NOT NULL
             )
         """)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS report_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL,
+                next_attempt_at INTEGER NOT NULL,
+                last_error TEXT
+            )
+            """
+        )
         init_map_tables(conn)
         conn.commit()
     
@@ -2103,8 +2240,36 @@ def _cloud_url(path: str) -> Optional[str]:
     return f"{CLOUD_API_URL.rstrip('/')}{path}"
 
 
+def _post_cloud_event_node(event_id: str, node_id: str) -> None:
+    if not event_id or _is_temp_event_id(event_id):
+        return
+    url = _cloud_url(f"/api/events/{quote(event_id, safe='')}/nodes")
+    if not url:
+        return
+    try:
+        requests.post(
+            url,
+            json={"node_id": node_id},
+            timeout=CLOUD_API_TIMEOUT,
+        )
+    except Exception as exc:
+        logger.warning(f"Cloud event node add failed: {exc}")
+
+
+def _post_cloud_event_node_end(event_id: str, node_id: str) -> None:
+    if not event_id or _is_temp_event_id(event_id):
+        return
+    url = _cloud_url(f"/api/events/{quote(event_id, safe='')}/nodes/{quote(node_id, safe='')}/end")
+    if not url:
+        return
+    try:
+        requests.post(url, timeout=CLOUD_API_TIMEOUT)
+    except Exception as exc:
+        logger.warning(f"Cloud event node end failed: {exc}")
+
+
 def _fetch_cloud_status() -> Optional[Dict[str, Any]]:
-    url = _cloud_url("/api/fleet/map-tiles/status")
+    url = _cloud_url("/api/tiles/state")
     if not url:
         return None
     params = {}
@@ -2143,6 +2308,64 @@ def _post_cloud_preferred(provider: str) -> Optional[Dict[str, Any]]:
         data = {"error": resp.text}
     data["status_code"] = resp.status_code
     return data
+
+
+def _post_cloud_tile_usage(provider: str, delta: int, month_key: str) -> bool:
+    url = _cloud_url("/api/tiles/usage")
+    if not url:
+        return False
+    node_id = NODE_ID or SYSTEM_ID
+    payload: Dict[str, Any] = {
+        "provider": provider,
+        "delta": delta,
+        "month": month_key,
+        "node_id": node_id,
+    }
+    if DEPLOYMENT_ID:
+        payload["deployment_id"] = DEPLOYMENT_ID
+    try:
+        resp = requests.post(url, json=payload, timeout=CLOUD_API_TIMEOUT)
+    except Exception as exc:
+        logger.warning(f"Cloud tile usage update failed: {exc}")
+        return False
+    if resp.status_code not in (200, 201):
+        logger.warning(f"Cloud tile usage update failed ({resp.status_code})")
+        return False
+    return True
+
+
+def _sync_tile_usage_once() -> None:
+    if not CLOUD_API_URL:
+        return
+    month_key = utc_month_key()
+    with get_db() as conn:
+        totals = get_tile_counts(conn, month_key)
+        sent_totals = get_tile_sync_totals(conn, month_key)
+
+    for provider in MAP_TILE_PROVIDERS:
+        total = totals.get(provider, 0)
+        sent_total = sent_totals.get(provider, 0)
+        if total < sent_total:
+            with get_db() as conn:
+                set_tile_sync_total(conn, month_key, provider, total)
+                conn.commit()
+            continue
+        delta = total - sent_total
+        if delta <= 0:
+            continue
+        if _post_cloud_tile_usage(provider, delta, month_key):
+            with get_db() as conn:
+                set_tile_sync_total(conn, month_key, provider, total)
+                conn.commit()
+
+
+def tile_usage_sync_worker() -> None:
+    while not _heartbeat_stop.is_set():
+        try:
+            _sync_tile_usage_once()
+        except Exception as exc:
+            logger.warning(f"Tile usage sync failed: {exc}")
+        _heartbeat_stop.wait(max(TILE_USAGE_SYNC_INTERVAL, 5))
 
 
 @app.route("/api/map-tiles/increment", methods=["POST"])
@@ -2198,6 +2421,7 @@ def api_map_tiles_status():
     blocked: Dict[str, bool] = {provider: False for provider in MAP_TILE_PROVIDERS}
     preferred_provider = None
     recommended_provider = None
+    satellite_allowed = None
     warning = None
 
     if cloud_status:
@@ -2209,6 +2433,7 @@ def api_map_tiles_status():
         pct = cloud_status.get("pct") or pct
         blocked = cloud_status.get("blocked") or blocked
         recommended_provider = cloud_status.get("recommendedProvider")
+        satellite_allowed = cloud_status.get("satelliteAllowed")
         warning = cloud_status.get("warning")
 
     if not preferred_provider:
@@ -2239,6 +2464,8 @@ def api_map_tiles_status():
 
     if not cloud_status:
         warning = warning or "Cloud totals unavailable."
+    if satellite_allowed is None:
+        satellite_allowed = not (blocked.get("mapbox") and blocked.get("esri"))
 
     resp = jsonify({
         "month_key": month_key,
@@ -2249,6 +2476,7 @@ def api_map_tiles_status():
         "blocked": blocked,
         "preferredProvider": preferred_provider,
         "recommendedProvider": recommended_provider,
+        "satelliteAllowed": satellite_allowed,
         "warning": warning,
         "providers": MAP_TILE_PROVIDERS_CONFIG,
         "node_id": NODE_ID or None,
@@ -2376,12 +2604,16 @@ def api_event_start():
     data = request.get_json() or {}
     system_id = canonicalize_system_id(data.get("system_id", "").strip() or SYSTEM_ID)
     event_id = data.get("event_id", "").strip()
+    temp_event_id = ""
     location = data.get("location", "").strip()
     note = data.get("note", "").strip()
     ts = data.get("ts")  # optional, for backfill
     
     if not event_id:
-        return jsonify({"error": "event_id required"}), 400
+        event_id = _generate_temp_event_id(system_id)
+        temp_event_id = event_id
+    elif _is_temp_event_id(event_id):
+        temp_event_id = event_id
     
     # Use current time if not provided
     if ts is None:
@@ -2426,10 +2658,14 @@ def api_event_start():
             conn.commit()
         
         log_audit("event_start", system_id, event_id, location, note, True)
+        node_key = NODE_ID or SYSTEM_ID
+        if node_key:
+            _post_cloud_event_node(event_id, node_key)
         return jsonify({
             "success": True,
             "system_id": system_id,
             "event_id": event_id,
+            "temp_event_id": temp_event_id or None,
             "location": location,
             "ts": ts
         })
@@ -2552,6 +2788,9 @@ def api_event_end_all():
                 conn.commit()
             
             log_audit("event_end_all", "-", event_id, success=True)
+            node_key = NODE_ID or SYSTEM_ID
+            if node_key:
+                _post_cloud_event_node_end(event_id, node_key)
             
             # Auto-generate report in background
             try:
@@ -5956,6 +6195,14 @@ heartbeat_thread = threading.Thread(target=heartbeat_worker, daemon=True, name="
 heartbeat_thread.start()
 logger.info("Heartbeat thread started")
 
+report_thread = threading.Thread(target=report_upload_worker, daemon=True, name="report-upload")
+report_thread.start()
+logger.info("Report upload worker started")
+
+tile_usage_thread = threading.Thread(target=tile_usage_sync_worker, daemon=True, name="tile-usage-sync")
+tile_usage_thread.start()
+logger.info("Tile usage sync worker started")
+
 if __name__ == "__main__":
     # Only used for local development: python app.py
     # Production uses: gunicorn -w 2 -b 0.0.0.0:8088 app:app
@@ -5965,4 +6212,3 @@ if __name__ == "__main__":
     
     port = int(os.environ.get("PORT", "8088"))
     app.run(host="0.0.0.0", port=port, debug=False)
-

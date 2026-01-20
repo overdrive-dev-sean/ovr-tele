@@ -18,6 +18,7 @@ export default function MapPanel({
   activeProvider,
   onTileAttempt,
   defaultZoom,
+  tilesEnabled,
   isActive
 }) {
   const mapRef = useRef(null);
@@ -40,7 +41,16 @@ export default function MapPanel({
 
   useEffect(() => {
     const map = mapRef.current?._leaflet_map;
-    if (!map || !providers) return;
+    if (!map) return;
+    if (tilesEnabled === false) {
+      if (layerRef.current) {
+        layerRef.current.off('tileloadstart');
+        map.removeLayer(layerRef.current);
+        layerRef.current = null;
+      }
+      return;
+    }
+    if (!providers) return;
     const provider =
       providers[activeProvider] || providers.esri || Object.values(providers)[0];
     if (!provider || !provider.url) return;
@@ -63,7 +73,7 @@ export default function MapPanel({
     }
     layer.addTo(map);
     layerRef.current = layer;
-  }, [providers, activeProvider]);
+  }, [providers, activeProvider, tilesEnabled]);
 
   useEffect(() => {
     const map = mapRef.current?._leaflet_map;
