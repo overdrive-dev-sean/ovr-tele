@@ -1,3 +1,4 @@
-- action: drop
-  source_labels: [instance]
-  regex: ".+:9100"
+# Keep only downsampled series + (optionally) a few raw “state” metrics.
+- action: keep
+  source_labels: [__name__]
+  regex: 'ovr_event_active|.*:10s_avg$'

@@ -27,7 +27,7 @@ services:
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/overdrive/site.env
+      - /etc/ovr/site.env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
@@ -37,12 +37,12 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./vmagent/entrypoint.sh:/entrypoint.sh:ro
-      - /etc/overdrive/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro
-      - /etc/overdrive/targets.yml:/etc/overdrive/targets.yml:ro
-      - /etc/overdrive/stream_aggr.yml:/etc/overdrive/stream_aggr.yml:ro
-      - /etc/overdrive/remote_write_local_relabel.yml:/etc/overdrive/remote_write_local_relabel.yml:ro
-      - /etc/overdrive/remote_write_cloud_relabel.yml:/etc/overdrive/remote_write_cloud_relabel.yml:ro
-      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - /etc/ovr/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro
+      - /etc/ovr/targets.yml:/etc/ovr/targets.yml:ro
+      - /etc/ovr/stream_aggr.yml:/etc/ovr/stream_aggr.yml:ro
+      - /etc/ovr/remote_write_local_relabel.yml:/etc/ovr/remote_write_local_relabel.yml:ro
+      - /etc/ovr/remote_write_cloud_relabel.yml:/etc/ovr/remote_write_cloud_relabel.yml:ro
+      - /etc/ovr/secrets:/etc/ovr/secrets:ro
       - vmagent_tmp:/tmp/vmagent
     restart: unless-stopped
 
@@ -52,7 +52,7 @@ services:
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/overdrive/site.env
+      - /etc/ovr/site.env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
@@ -71,7 +71,7 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file:
-      - /etc/overdrive/site.env
+      - /etc/ovr/site.env
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - ./telegraf/telegraf.d:/etc/telegraf/telegraf.d:ro
@@ -96,9 +96,9 @@ services:
       - "127.0.0.1:8088:8088"
     volumes:
       - event_data:/data
-      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - /etc/ovr/secrets:/etc/ovr/secrets:ro
     env_file:
-      - /etc/overdrive/site.env
+      - /etc/ovr/site.env
     environment:
       - DB_PATH=/data/events.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
