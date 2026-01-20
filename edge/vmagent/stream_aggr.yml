@@ -1,4 +1,3 @@
-- match: '{instance!~".*:9100"}'
+- match: '{job=~"gx_fast|gx_slow|vm_federate_acuvim"}'
   interval: 10s
-  outputs:
-    - avg
+  outputs: [avg]

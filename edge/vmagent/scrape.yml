@@ -11,7 +11,7 @@ scrape_configs:
     scrape_timeout: 400ms
     file_sd_configs:
       - files:
-          - /etc/overdrive/targets.yml
+          - /etc/ovr/targets.yml
     relabel_configs:
       - source_labels: [job]
         regex: gx_fast
@@ -22,7 +22,7 @@ scrape_configs:
     scrape_timeout: 4s
     file_sd_configs:
       - files:
-          - /etc/overdrive/targets.yml
+          - /etc/ovr/targets.yml
     relabel_configs:
       - source_labels: [job]
         regex: gx_slow
@@ -33,7 +33,7 @@ scrape_configs:
     scrape_timeout: 4s
     file_sd_configs:
       - files:
-          - /etc/overdrive/targets.yml
+          - /etc/ovr/targets.yml
     relabel_configs:
       - source_labels: [job]
         regex: node_exporter
@@ -45,7 +45,7 @@ scrape_configs:
     metrics_path: /metrics
     file_sd_configs:
       - files:
-          - /etc/overdrive/targets.yml
+          - /etc/ovr/targets.yml
     relabel_configs:
       - source_labels: [job]
         regex: event_service
