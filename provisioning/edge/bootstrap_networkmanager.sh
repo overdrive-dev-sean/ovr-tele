@@ -109,6 +109,17 @@ disable_networkd_if_active() {
   fi
 }
 
+disable_ifupdown_if_active() {
+  if systemctl list-unit-files --type=service 2>/dev/null | grep -q '^networking\.service'; then
+    if systemctl is-active --quiet networking 2>/dev/null; then
+      log "Disabling ifupdown networking service to avoid conflicts"
+      systemctl disable --now networking
+    else
+      systemctl disable networking >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
 restart_nm() {
   systemctl enable --now NetworkManager
   systemctl restart NetworkManager
@@ -133,12 +144,16 @@ ensure_conn() {
   local conn_name="$2"
   local ipv4_method="$3"
   local ipv6_method="$4"
+  local flush_iface="${5:-0}"
   local desired_name="$conn_name"
 
   if ! iface_exists "$ifname"; then
     log "Skipping ${ifname} (interface not present)"
     return 0
   fi
+
+  nmcli dev set "$ifname" managed yes >/dev/null 2>&1 || true
+  ip link set "$ifname" up >/dev/null 2>&1 || true
 
   local existing=""
   existing="$(find_conn_for_iface "$ifname")"
@@ -168,13 +183,17 @@ ensure_conn() {
     log "Created connection ${conn_name} (${ifname})"
   fi
 
+  if [ "$flush_iface" = "1" ]; then
+    ip addr flush dev "$ifname" >/dev/null 2>&1 || true
+  fi
+
   nmcli connection up "$existing" >/dev/null 2>&1 || nmcli connection up "$conn_name" >/dev/null 2>&1 || true
 }
 
 validate() {
   echo ""
   echo "${LOG_PREFIX} Validation:"
-  nmcli dev status || true
+  nmcli -f DEVICE,TYPE,STATE,CONNECTION,GENERAL.MANAGED dev status || true
   nmcli -t -f NAME,DEVICE,TYPE,STATE connection show --active || true
 }
 
@@ -186,9 +205,10 @@ main() {
   backup_ifupdown
   write_nm_config
   disable_networkd_if_active
+  disable_ifupdown_if_active
   restart_nm
 
-  ensure_conn enp1s0 enp1s0-dhcp auto auto
+  ensure_conn enp1s0 enp1s0-dhcp auto auto 1
 
   for dev in enp2s0 enp3s0 enp4s0 enp5s0 enp7s0; do
     ensure_conn "$dev" "${dev}-noip" disabled ignore
