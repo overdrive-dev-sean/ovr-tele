@@ -6,10 +6,12 @@ MARKER="/etc/ovr/.firstboot_done"
 ENV_FILE="/etc/ovr/firstboot.env"
 BOOTSTRAP_ARGS_FILE="/etc/ovr/bootstrap.args"
 BOOTSTRAP_SCRIPT="/opt/stack/provisioning/edge/bootstrap_n100.sh"
+NM_BOOTSTRAP_SCRIPT="/opt/stack/provisioning/edge/bootstrap_networkmanager.sh"
 PACKAGE_LIST_FILE_DEFAULT="/opt/stack/provisioning/edge/firstboot-packages.txt"
 PACKAGE_LIST_FILE="${PACKAGE_LIST_FILE:-$PACKAGE_LIST_FILE_DEFAULT}"
 WIFI_PACKAGE_LIST_FILE_DEFAULT="/opt/stack/provisioning/edge/firstboot-packages-wifi.txt"
 WIFI_PACKAGE_LIST_FILE="${WIFI_PACKAGE_LIST_FILE:-$WIFI_PACKAGE_LIST_FILE_DEFAULT}"
+RUN_NM_BOOTSTRAP="${RUN_NM_BOOTSTRAP:-1}"
 RUN_PACKAGE_INSTALL="${RUN_PACKAGE_INSTALL:-1}"
 RUN_WIFI_SETUP="${RUN_WIFI_SETUP:-1}"
 APT_FORCE_IPV4="${APT_FORCE_IPV4:-0}"
@@ -1020,12 +1022,20 @@ run_bootstrap() {
     return 0
   fi
 
-  "$BOOTSTRAP_SCRIPT" "${args[@]}"
+  /usr/bin/bash "$BOOTSTRAP_SCRIPT" "${args[@]}"
 }
 
 main() {
   resize_tty
   preflight_network
+
+  if [ "${RUN_NM_BOOTSTRAP:-1}" = "1" ]; then
+    if [ -x "$NM_BOOTSTRAP_SCRIPT" ]; then
+      /usr/bin/bash "$NM_BOOTSTRAP_SCRIPT"
+    else
+      say "NetworkManager bootstrap script not found: $NM_BOOTSTRAP_SCRIPT"
+    fi
+  fi
 
   if [ "${RUN_WIFI_SETUP:-1}" = "1" ]; then
     ensure_nonfree_firmware_sources
