@@ -5,8 +5,6 @@
 OverdriveFleet
 --node-id
 ?Node ID
---hostname
-?Hostname (blank to skip)
 --remote-write-url
 https://metrics.overdrive.rocks/api/v1/write
 --remote-write-user
