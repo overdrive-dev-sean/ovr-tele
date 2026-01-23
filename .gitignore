@@ -1,2 +1,4 @@
 edge/.env
 cloud/.env
+__pycache__/
+*.pyc
