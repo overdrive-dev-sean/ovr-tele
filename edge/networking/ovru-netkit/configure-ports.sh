@@ -39,6 +39,8 @@ GX_CLIENT_IP="${GX_CLIENT_IP:-${LAN_CLIENT_IP:-}}"
 GX_DNS="${GX_DNS:-${LAN_DNS:-1.1.1.1,8.8.8.8}}"
 GX_DHCP_LEASE="${GX_DHCP_LEASE:-${LAN_DHCP_LEASE:-5m}}"
 GX_DHCP_NETMASK="${GX_DHCP_NETMASK:-${LAN_DHCP_NETMASK:-auto}}"
+GX_DHCP_RANGE_START="${GX_DHCP_RANGE_START:-}"
+GX_DHCP_RANGE_END="${GX_DHCP_RANGE_END:-}"
 GX_ENABLE_DNSMASQ="${GX_ENABLE_DNSMASQ:-1}"
 GX_ENABLE_NAT="${GX_ENABLE_NAT:-1}"
 GX_ENABLE_FORWARDING="${GX_ENABLE_FORWARDING:-1}"
@@ -522,7 +524,7 @@ maybe_prompt_labels() {
     return 0
   fi
 
-  local labels_file="${IFACE_LABELS_FILE:-/etc/overdrive/iface-labels.conf}"
+  local labels_file="${IFACE_LABELS_FILE:-/etc/ovr/iface-labels.conf}"
   local labels_dir
   labels_dir="$(dirname "$labels_file")"
   if [ -n "$labels_dir" ]; then
@@ -578,7 +580,7 @@ maybe_prompt_lan_settings() {
     return 0
   fi
 
-  echo "CIDR tips: /24 normal, /30 GX point-to-point, /29 = 6 usable."
+  echo "CIDR tips: /24 typical, /30 point-to-point, /29 = 6 usable."
   prompt_value LAN_IP_CIDR "LAN IP/CIDR (node)" "${LAN_IP_CIDR:-}"
   prompt_value LAN_CLIENT_IP "GX/LAN client IP (DHCP lease)" "${LAN_CLIENT_IP:-}"
   sync_gx_from_lan
@@ -623,9 +625,11 @@ maybe_prompt_interfaces() {
   show_prompt_guidance
   maybe_prompt_labels
 
-  prompt_iface LAN_IF "LAN interface (GX LAN)" ethernet
-  if [ -n "$LAN_IF" ] && [ -z "$GX_IF" ]; then
-    GX_IF="$LAN_IF"
+  if [ "$GX_ENABLE" = "1" ]; then
+    prompt_iface LAN_IF "LAN interface (GX LAN)" ethernet
+    if [ -n "$LAN_IF" ] && [ -z "$GX_IF" ]; then
+      GX_IF="$LAN_IF"
+    fi
   fi
 
   if [ "$WAN_ENABLE" = "1" ]; then
@@ -767,15 +771,22 @@ configure_modbus() {
 
 configure_dnsmasq() {
   need_var GX_IF
-  need_var GX_CLIENT_IP
   need_cmd dnsmasq
+  local dhcp_range=""
+
+  if [ -n "${GX_DHCP_RANGE_START}" ] && [ -n "${GX_DHCP_RANGE_END}" ]; then
+    dhcp_range="${GX_DHCP_RANGE_START},${GX_DHCP_RANGE_END},${GX_DHCP_NETMASK},${GX_DHCP_LEASE}"
+  else
+    need_var GX_CLIENT_IP
+    dhcp_range="${GX_CLIENT_IP},${GX_CLIENT_IP},${GX_DHCP_NETMASK},${GX_DHCP_LEASE}"
+  fi
 
   cat > /etc/dnsmasq.d/ovr-gx-dhcp.conf <<EOF
 port=0
 interface=${GX_IF}
 bind-dynamic
 dhcp-authoritative
-dhcp-range=${GX_CLIENT_IP},${GX_CLIENT_IP},${GX_DHCP_NETMASK},${GX_DHCP_LEASE}
+dhcp-range=${dhcp_range}
 dhcp-option=option:router,${GX_IP_CIDR%/*}
 dhcp-option=option:dns-server,${GX_DNS}
 EOF

@@ -6,13 +6,13 @@ EDGE_DIR="${EDGE_DIR:-/opt/edge}"
 if [ ! -d "${EDGE_DIR}" ] && [ -d "/opt/stack/edge" ]; then
   EDGE_DIR="/opt/stack/edge"
 fi
-OVERDRIVE_DIR="${OVERDRIVE_DIR:-/etc/overdrive}"
+OVR_DIR="${OVR_DIR:-/etc/ovr}"
 
 OUT_DIR="${EDGE_DIR}/telegraf/telegraf.d"
-LIST="${OVERDRIVE_DIR}/targets_acuvim.txt"
+LIST="${OVR_DIR}/targets_acuvim.txt"
 TPL="${EDGE_DIR}/telegraf/templates/acuvim_modbus.tpl"
 
-# Fallback to repo file if not present in /etc/overdrive
+# Fallback to repo file if not present in /etc/ovr
 if [ ! -f "${LIST}" ]; then
   LIST="${EDGE_DIR}/telegraf/targets_acuvim.txt"
 fi

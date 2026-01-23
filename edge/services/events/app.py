@@ -103,8 +103,9 @@ def canonicalize_system_id(system_id: str) -> str:
     return trimmed
 
 # System identification
-SYSTEM_ID = canonicalize_system_id(os.environ.get("SYSTEM_ID", "default-system"))
 NODE_ID = os.environ.get("NODE_ID", "").strip()
+SYSTEM_ID_RAW = os.environ.get("SYSTEM_ID", "").strip()
+SYSTEM_ID = canonicalize_system_id(SYSTEM_ID_RAW or NODE_ID)
 DEPLOYMENT_ID = os.environ.get("DEPLOYMENT_ID", "").strip()
 TEMP_EVENT_PREFIX = "temp-"
 
@@ -119,7 +120,7 @@ CLOUD_API_TIMEOUT = float(os.environ.get("CLOUD_API_TIMEOUT", "4"))
 TILE_USAGE_SYNC_INTERVAL = int(os.environ.get("TILE_USAGE_SYNC_INTERVAL", "60"))
 
 # GX Device SSH configuration
-GX_HOST = os.environ.get("GX_HOST", "192.168.100.2")
+GX_HOST = os.environ.get("GX_HOST", "").strip()
 GX_USER = os.environ.get("GX_USER", "root")
 GX_PASSWORD = os.environ.get("GX_PASSWORD", "").strip()
 GX_PASSWORD_FILE = os.environ.get("GX_PASSWORD_FILE", "").strip()

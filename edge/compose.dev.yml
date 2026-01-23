@@ -27,7 +27,7 @@ services:
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/ovr/site.env
+      - .env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
@@ -52,7 +52,7 @@ services:
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/ovr/site.env
+      - .env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
@@ -71,7 +71,7 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file:
-      - /etc/ovr/site.env
+      - .env
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - ./telegraf/telegraf.d:/etc/telegraf/telegraf.d:ro
@@ -98,7 +98,7 @@ services:
       - event_data:/data
       - /etc/ovr/secrets:/etc/ovr/secrets:ro
     env_file:
-      - /etc/ovr/site.env
+      - .env
     environment:
       - DB_PATH=/data/events.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

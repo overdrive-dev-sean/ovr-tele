@@ -22,11 +22,13 @@ sudo docker compose -f compose.dev.yml up -d --build
 
 ```bash
 cd edge
-cp edge.env.example edge.env
+sudo mkdir -p /etc/ovr
+sudo cp edge.env.example /etc/ovr/edge.env
+sudo ln -sf /etc/ovr/edge.env .env
 # edit GHCR_OWNER (required unless hardcoded), EDGE_VERSION, and pin third-party images (no :latest)
 # Helper: ./scripts/pin_third_party_images.sh edge edge/compose.dev.yml
-sudo docker compose --env-file edge.env -f compose.release.yml pull
-sudo docker compose --env-file edge.env -f compose.release.yml up -d
+sudo docker compose -f compose.release.yml pull
+sudo docker compose -f compose.release.yml up -d
 ```
 
 ### Recommended: store pins per release
@@ -39,16 +41,18 @@ Then on nodes, you can do:
 
 ```bash
 cd /opt/edge/edge
-sudo docker compose --env-file edge/pins/vX.Y.Z.env -f compose.release.yml up -d
+sudo ln -sf /opt/edge/edge/pins/vX.Y.Z.env /etc/ovr/edge.env
+sudo ln -sf /etc/ovr/edge.env /opt/edge/edge/.env
+sudo docker compose -f compose.release.yml up -d
 ```
 
 ## Node configuration
 
-Most node-specific configuration is externalized to `/etc/overdrive/` on the host:
+Most node-specific configuration is externalized to `/etc/ovr/` on the host:
 
-- `/etc/overdrive/site.env` (deployment_id, node_id, remote write URLs, etc)
-- `/etc/overdrive/targets.yml` (optional)
-- `/etc/overdrive/secrets/` (API keys, passwords)
+- `/etc/ovr/edge.env` (deployment_id, node_id, remote write URLs, etc)
+- `/etc/ovr/targets.yml` (optional)
+- `/etc/ovr/secrets/` (API keys, passwords)
 
 Provisioning scripts for creating these live in `../provisioning/edge/`.
 

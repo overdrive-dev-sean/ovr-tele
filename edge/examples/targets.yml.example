@@ -2,22 +2,26 @@
     - "__GX_HOST__:9480"
   labels:
     job: gx_fast
-    system_id: "__SYSTEM_ID__"
+    system_id: "__GX_HOSTNAME__"
+    gx_host: "__GX_HOST__"
 
 - targets:
     - "__GX_HOST__:9481"
   labels:
     job: gx_slow
-    system_id: "__SYSTEM_ID__"
+    system_id: "__GX_HOSTNAME__"
+    gx_host: "__GX_HOST__"
 
 - targets:
     - "host.docker.internal:9100"
   labels:
     job: node_exporter
-    system_id: "__SYSTEM_ID__"
+    system_id: "__NODE_ID__"
+    node_id: "__NODE_ID__"
 
 - targets:
     - "events:8088"
   labels:
     job: event_service
-    system_id: "__SYSTEM_ID__"
+    system_id: "__NODE_ID__"
+    node_id: "__NODE_ID__"

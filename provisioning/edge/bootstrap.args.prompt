@@ -5,8 +5,6 @@
 OverdriveFleet
 --node-id
 ?Node ID
---system-id
-?System ID (blank to use Node ID)
 --hostname
 ?Hostname (blank to skip)
 --remote-write-url
@@ -14,22 +12,22 @@ https://metrics.overdrive.rocks/api/v1/write
 --remote-write-user
 ovr
 --remote-write-password-file
-/etc/overdrive/secrets/remote_write_password
+/etc/ovr/secrets/remote_write_password
 --vm-write-url-secondary
 https://metrics.overdrive.rocks/write
 --vm-write-username
 ovr
 --vm-write-password-file
-/etc/overdrive/secrets/vm_write_password
+/etc/ovr/secrets/vm_write_password
 --event-api-key-file
-/etc/overdrive/secrets/event_api_key
+/etc/ovr/secrets/event_api_key
 --has-gx
 ?Has GX? (true/false, blank to skip)
 --gx-host
-192.168.100.2
+?GX host (optional hostname/IP)
 --gx-port
 22
 --gx-user
 root
 --gx-password-file
-/etc/overdrive/secrets/gx_password
+/etc/ovr/secrets/gx_password

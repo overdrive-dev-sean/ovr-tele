@@ -1,5 +1,7 @@
 # Base packages installed during first boot (one per line).
 arping
+avahi-daemon
+avahi-utils
 bash-completion
 bridge-utils
 ca-certificates
@@ -22,6 +24,7 @@ iotop
 iperf3
 isc-dhcp-server
 jq
+libnss-mdns
 lm-sensors
 lsb-release
 lshw

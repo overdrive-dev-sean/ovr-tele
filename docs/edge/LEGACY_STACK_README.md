@@ -621,7 +621,7 @@ Monitoring:
   - `sum(map_tiles_month_total{provider="esri"})`
 
 Ensure vmagent scrapes the event-service `/metrics` endpoint and remote_write relabeling does not drop
-`map_tiles_month_*` series (update `/etc/overdrive/targets.yml` and your relabel configs if needed).
+`map_tiles_month_*` series (update `/etc/ovr/targets.yml` and your relabel configs if needed).
 
 ### Grafana Visualization
 

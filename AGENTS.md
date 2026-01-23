@@ -44,7 +44,7 @@ It describes *how to make changes* in this repo without breaking field deploymen
 ### If you change **provisioning**
 - Keep it idempotent (safe to re-run)
 - Never hardcode secrets
-- Prefer writing config into `/etc/overdrive/`
+- Prefer writing config into `/etc/ovr/`
 
 ### If you change **compose files**
 - Release compose files must remain reproducible.

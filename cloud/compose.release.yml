@@ -6,11 +6,13 @@
 #
 # Usage:
 #   cd /opt/stack
-#   docker compose -f cloud/compose.release.yml --env-file cloud/.env up -d
+#   # Ensure cloud/.env -> /etc/ovr/cloud.env (symlink)
+#   docker compose -f cloud/compose.release.yml up -d
+#   # Optional: docker compose --env-file cloud/.env -f cloud/compose.release.yml up -d
 
 services:
   victoria-metrics:
-    image: ${VM_IMAGE:?Set VM_IMAGE in cloud/.env (pin by tag or digest; no latest tag)}
+    image: ${VM_IMAGE:?Set VM_IMAGE in .env (symlink to /etc/ovr/cloud.env; pin by tag or digest; no latest tag)}
     command:
       - "-storageDataPath=/storage"
       - "-retentionPeriod=${VM_RETENTION:-365d}"
@@ -20,12 +22,12 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: ${GRAFANA_IMAGE:?Set GRAFANA_IMAGE in cloud/.env (pin by tag or digest; no latest tag)}
+    image: ${GRAFANA_IMAGE:?Set GRAFANA_IMAGE in .env (symlink to /etc/ovr/cloud.env; pin by tag or digest; no latest tag)}
     depends_on:
       - victoria-metrics
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD__FILE=/etc/overdrive/secrets/grafana_admin_password
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/etc/ovr/secrets/grafana_admin_password
       - GF_SERVER_DOMAIN=grafana.${BASE_DOMAIN}
       - GF_SERVER_ROOT_URL=https://grafana.${BASE_DOMAIN}/
       - GF_USERS_ALLOW_SIGN_UP=false
@@ -35,7 +37,7 @@ services:
     restart: unless-stopped
 
   api:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in cloud/.env}/cloud-api:${CLOUD_TAG:-main}
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in .env}/cloud-api:${CLOUD_TAG:-main}
     depends_on:
       - victoria-metrics
     environment:
@@ -71,11 +73,11 @@ services:
     volumes:
       - fleet_data:/data
       - fleet_reports:/data/reports
-      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - /etc/ovr/secrets:/etc/ovr/secrets:ro
     restart: unless-stopped
 
   map:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in cloud/.env}/cloud-map:${CLOUD_TAG:-main}
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in .env}/cloud-map:${CLOUD_TAG:-main}
     depends_on:
       - api
     restart: unless-stopped
@@ -92,7 +94,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy-entrypoint.sh:/entrypoint.sh:ro
-      - /etc/overdrive/secrets:/etc/overdrive/secrets:ro
+      - /etc/ovr/secrets:/etc/ovr/secrets:ro
       - caddy_data:/data
       - caddy_config:/config
     environment:
