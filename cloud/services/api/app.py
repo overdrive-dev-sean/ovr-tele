@@ -391,6 +391,24 @@ def _event_registry_status(entry: Dict[str, Any]) -> str:
     return "ended" if entry.get("ended_at") else "active"
 
 
+def _resolve_event_registry(value: str) -> Optional[Dict[str, Any]]:
+    cleaned = _clean_event_name(value)
+    if not cleaned:
+        return None
+    event = _get_event_registry(cleaned)
+    if event:
+        return event
+    name_norm = _normalize_event_name(cleaned)
+    if not name_norm:
+        return None
+    return _get_event_registry_by_norm(name_norm)
+
+
+def _resolve_event_registry_id(value: str) -> Optional[str]:
+    event = _resolve_event_registry(value)
+    return event["event_id"] if event else None
+
+
 def _get_event_registry(event_id: str) -> Optional[Dict[str, Any]]:
     with _get_db() as conn:
         row = conn.execute(
@@ -2786,6 +2804,8 @@ def api_events() -> Any:
             return jsonify(
                 {
                     "error": "event_name_exists",
+                    "event_id": existing["event_id"],
+                    "already_existed": True,
                     "existing": {
                         "event_id": existing["event_id"],
                         "event_name": existing["event_name"],
@@ -2862,9 +2882,16 @@ def api_events_registry() -> Any:
 
 @app.route("/api/events/<event_id>", methods=["GET"])
 def api_event_detail(event_id: str) -> Any:
-    event = _get_event(event_id)
+    resolved = _resolve_event_registry(event_id)
+    resolved_id = resolved["event_id"] if resolved else event_id
+    event = _get_event(resolved_id)
     if not event:
         return jsonify({"error": "event not found"}), 404
+    if resolved:
+        event["event_name"] = resolved["event_name"]
+        event["name"] = resolved["event_name"]
+        event["started_at"] = resolved["started_at"]
+        event["ended_at"] = resolved["ended_at"]
     resp = jsonify(event)
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -2873,14 +2900,16 @@ def api_event_detail(event_id: str) -> Any:
 
 @app.route("/api/events/<event_id>/end", methods=["POST"])
 def api_event_end(event_id: str) -> Any:
-    event = _get_event_registry(event_id)
+    resolved = _resolve_event_registry(event_id)
+    resolved_id = resolved["event_id"] if resolved else event_id
+    event = _get_event_registry(resolved_id)
     if not event:
-        legacy_event = _end_event(event_id)
+        legacy_event = _end_event(resolved_id)
         if legacy_event:
             return jsonify(legacy_event)
         return jsonify({"error": "event not found"}), 404
     ended_at = _event_timestamp()
-    nodes = _load_nodes(event_ids=[event_id])
+    nodes = _load_nodes(event_ids=[resolved_id])
     ts_ns = int(ended_at * 1_000_000_000)
     lines: List[str] = []
     seen: set[tuple[str, Optional[str], Optional[str]]] = set()
@@ -2895,7 +2924,7 @@ def api_event_end(event_id: str) -> Any:
             continue
         seen.add(key)
         line = _build_event_line(
-            event_id,
+            resolved_id,
             system_id,
             node_id,
             deployment_id,
@@ -2909,8 +2938,8 @@ def api_event_end(event_id: str) -> Any:
         ok, error = _vm_write_lines(lines)
         if not ok:
             return jsonify({"error": "vm_write_failed", "detail": error}), 502
-    _end_event_registry(event_id, ended_at)
-    _mark_legacy_event_ended(event_id, ended_at)
+    _end_event_registry(resolved_id, ended_at)
+    _mark_legacy_event_ended(resolved_id, ended_at)
     event["ended_at"] = ended_at
     payload = {
         "event_id": event["event_id"],
@@ -2936,7 +2965,9 @@ def api_event_add_nodes_bulk(event_id: str) -> Any:
     if not node_ids:
         return jsonify({"error": "node_ids required"}), 400
 
-    event = _get_event_registry(event_id)
+    resolved = _resolve_event_registry(event_id)
+    resolved_id = resolved["event_id"] if resolved else event_id
+    event = _get_event_registry(resolved_id)
     if not event:
         return jsonify({"error": "event not found"}), 404
 
@@ -2950,18 +2981,18 @@ def api_event_add_nodes_bulk(event_id: str) -> Any:
     added: List[Dict[str, Any]] = []
     missing: List[str] = []
     for node_id in node_ids:
-        resolved = nodes_by_id.get(node_id)
-        if not resolved:
+        node_entry = nodes_by_id.get(node_id)
+        if not node_entry:
             missing.append(node_id)
             continue
-        system_id = resolved.get("host_system_id") or resolved.get("system_id")
-        deployment_id = resolved.get("deployment_id")
+        system_id = node_entry.get("host_system_id") or node_entry.get("system_id")
+        deployment_id = node_entry.get("deployment_id")
         line = _build_event_line(
-            event_id,
+            resolved_id,
             system_id,
             node_id,
             deployment_id,
-            location or resolved.get("location"),
+            location or node_entry.get("location"),
             1,
             ts_ns,
         )
@@ -2987,11 +3018,11 @@ def api_event_add_nodes_bulk(event_id: str) -> Any:
         return jsonify({"error": "vm_write_failed", "detail": error}), 502
 
     for entry in added:
-        _add_event_node(event_id, entry["node_id"])
+        _add_event_node(resolved_id, entry["node_id"])
 
     return jsonify(
         {
-            "event_id": event_id,
+            "event_id": resolved_id,
             "added": added,
             "missing": missing,
             "started_at": started_at,
@@ -3005,22 +3036,24 @@ def api_event_add_node(event_id: str) -> Any:
     node_id = str(payload.get("node_id", "")).strip()
     if not node_id:
         return jsonify({"error": "node_id required"}), 400
-    event = _get_event(event_id)
+    resolved_id = _resolve_event_registry_id(event_id) or event_id
+    event = _get_event(resolved_id)
     if not event:
         return jsonify({"error": "event not found"}), 404
-    created = _add_event_node(event_id, node_id)
-    return jsonify({"event_id": event_id, "node_id": node_id, "created": created})
+    created = _add_event_node(resolved_id, node_id)
+    return jsonify({"event_id": resolved_id, "node_id": node_id, "created": created})
 
 
 @app.route("/api/events/<event_id>/nodes/<node_id>/end", methods=["POST"])
 def api_event_end_node(event_id: str, node_id: str) -> Any:
-    event = _get_event(event_id)
+    resolved_id = _resolve_event_registry_id(event_id) or event_id
+    event = _get_event(resolved_id)
     if not event:
         return jsonify({"error": "event not found"}), 404
-    updated = _end_event_node(event_id, node_id)
+    updated = _end_event_node(resolved_id, node_id)
     if not updated:
         return jsonify({"error": "node not found"}), 404
-    return jsonify({"event_id": event_id, "node_id": node_id, "ended": True})
+    return jsonify({"event_id": resolved_id, "node_id": node_id, "ended": True})
 
 
 @app.route("/api/events/<event_id>/aliases", methods=["POST"])
@@ -3030,14 +3063,15 @@ def api_event_aliases(event_id: str) -> Any:
     temp_event_id = str(payload.get("temp_event_id", "")).strip()
     if not node_id or not temp_event_id:
         return jsonify({"error": "node_id and temp_event_id required"}), 400
-    event = _get_event(event_id)
+    resolved_id = _resolve_event_registry_id(event_id) or event_id
+    event = _get_event(resolved_id)
     if not event:
         return jsonify({"error": "event not found"}), 404
-    _add_event_alias(event_id, node_id, temp_event_id)
-    merged = _merge_temp_reports(event_id, node_id, temp_event_id)
+    _add_event_alias(resolved_id, node_id, temp_event_id)
+    merged = _merge_temp_reports(resolved_id, node_id, temp_event_id)
     return jsonify(
         {
-            "event_id": event_id,
+            "event_id": resolved_id,
             "node_id": node_id,
             "temp_event_id": temp_event_id,
             "merged_reports": merged.get("merged", 0),

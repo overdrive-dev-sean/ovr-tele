@@ -471,6 +471,17 @@ h1 {
   gap: 8px;
 }
 
+.event-select-group {
+  display: grid;
+  gap: 6px;
+}
+
+.event-select-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
 .event-select select {
   width: 100%;
   border: 1px solid var(--border);

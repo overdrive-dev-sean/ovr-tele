@@ -15,6 +15,7 @@ Format is inspired by "Keep a Changelog" and uses categories:
 ### Added
 - Cloud event manager + report storage endpoints (events, event nodes, aliases, report listing/aggregate).
 - Fleet Map event controls (start/end/merge) and event report viewer with aggregate links.
+- Fleet Map registry picker and per-event node membership list in the events panel.
 - Tile budget aggregation endpoints with provider switching + satellite disable policy, including UI counters.
 - Cloud event registry endpoints and VM-backed node assignment for events.
 
@@ -27,6 +28,7 @@ Format is inspired by "Keep a Changelog" and uses categories:
 ### Fixed
 - Fleet Map mobile layout now scrolls to the map on small screens.
 - Event lists now prefer friendly event names over UUIDs.
+- Fleet Map event actions now resolve registry aliases to canonical event IDs to prevent 404s.
 - Map tile totals fallback now checks unsuffixed metrics and remote write includes tile counters.
 - Monthly reports endpoint now emits debug metadata when empty.
 
