@@ -5,7 +5,7 @@
 # - Third-party dependencies MUST be pinned per edge release (avoid :latest).
 #
 # Usage on a node:
-#   cd /opt/edge/edge
+#   cd /opt/ovr/edge
 #   # First-time: create /etc/ovr/edge.env (or copy from example) and link .env
 #   sudo mkdir -p /etc/ovr
 #   sudo cp edge.env.example /etc/ovr/edge.env

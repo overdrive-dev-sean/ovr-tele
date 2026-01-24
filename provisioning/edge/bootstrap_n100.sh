@@ -2,10 +2,7 @@
 set -euo pipefail
 umask 027
 
-EDGE_DIR="${EDGE_DIR:-/opt/edge}"
-if [ ! -d "${EDGE_DIR}" ] && [ -d "/opt/stack/edge" ]; then
-  EDGE_DIR="/opt/stack/edge"
-fi
+EDGE_DIR="${EDGE_DIR:-/opt/ovr/edge}"
 OVR_DIR="${OVR_DIR:-/etc/ovr}"
 
 DEPLOYMENT_ID=""
@@ -119,7 +116,7 @@ need() {
   fi
 }
 
-read_site_env_value() {
+read_env_value() {
   local key="$1"
   local file="$2"
   local line
@@ -135,7 +132,7 @@ preserve_if_empty() {
   local file="$3"
   if [ -z "${!var_name}" ]; then
     local value
-    value="$(read_site_env_value "${key}" "${file}")"
+    value="$(read_env_value "${key}" "${file}")"
     if [ -n "${value}" ]; then
       printf -v "${var_name}" '%s' "${value}"
     fi
@@ -213,15 +210,8 @@ parse_targets_inline() {
 }
 
 load_existing_defaults() {
-  local existing_env=""
-  local candidate
-  for candidate in "${OVR_DIR}/edge.env" "${OVR_DIR}/site.env"; do
-    if [ -f "${candidate}" ]; then
-      existing_env="${candidate}"
-      break
-    fi
-  done
-  if [ -n "${existing_env}" ]; then
+  local existing_env="${OVR_DIR}/edge.env"
+  if [ -f "${existing_env}" ]; then
     preserve_if_empty SYSTEM_ID SYSTEM_ID "${existing_env}"
     preserve_if_empty BASE_DOMAIN BASE_DOMAIN "${existing_env}"
     preserve_if_empty DEPLOY_MODE DEPLOY_MODE "${existing_env}"
@@ -943,7 +933,7 @@ deploy_stack() {
   fi
 
   if [ ! -d "${EDGE_DIR}" ]; then
-    echo "ERROR: Missing edge directory at ${EDGE_DIR}. Expected edge runtime at /opt/edge (or legacy /opt/stack/edge)." >&2
+    echo "ERROR: Missing edge directory at ${EDGE_DIR}. Expected edge runtime at /opt/ovr/edge." >&2
     exit 1
   fi
 

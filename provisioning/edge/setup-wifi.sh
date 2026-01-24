@@ -149,7 +149,7 @@ main() {
 
   if ! command -v nmcli >/dev/null 2>&1; then
     echo "ERROR: nmcli not found. Install NetworkManager first." >&2
-    echo "Hint: sudo bash /opt/stack/provisioning/edge/install-packages.sh" >&2
+    echo "Hint: sudo bash /opt/ovr/provisioning/edge/install-packages.sh" >&2
     exit 1
   fi
 

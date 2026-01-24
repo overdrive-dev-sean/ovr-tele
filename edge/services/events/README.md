@@ -56,7 +56,7 @@ Lightweight HTTP service for marking events and location changes in OVR telemetr
 From the edge directory:
 
 ```bash
-cd /opt/edge  # or wherever you cloned the repo
+cd /opt/ovr/edge  # or wherever you cloned the repo
 sudo docker compose -f compose.dev.yml up -d --build events
 ```
 

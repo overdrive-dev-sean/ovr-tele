@@ -5,7 +5,7 @@
 # For named releases, set CLOUD_TAG=<semver> and tag the repo `cloud/v<semver>`.
 #
 # Usage:
-#   cd /opt/stack
+#   cd /opt/ovr
 #   # Ensure cloud/.env -> /etc/ovr/cloud.env (symlink)
 #   docker compose -f cloud/compose.release.yml up -d
 #   # Optional: docker compose --env-file cloud/.env -f cloud/compose.release.yml up -d

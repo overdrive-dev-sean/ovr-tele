@@ -2,10 +2,7 @@
 set -euo pipefail
 umask 022
 
-EDGE_DIR="${EDGE_DIR:-/opt/edge}"
-if [ ! -d "${EDGE_DIR}" ] && [ -d "/opt/stack/edge" ]; then
-  EDGE_DIR="/opt/stack/edge"
-fi
+EDGE_DIR="${EDGE_DIR:-/opt/ovr/edge}"
 OVR_DIR="${OVR_DIR:-/etc/ovr}"
 
 OUT_DIR="${EDGE_DIR}/telegraf/telegraf.d"

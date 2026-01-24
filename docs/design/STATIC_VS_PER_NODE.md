@@ -11,6 +11,6 @@
 | Telegraf global tags | `edge/telegraf/telegraf.conf` | Per-node values | Uses env vars from `/etc/ovr/edge.env`. |
 | Acuvim IP list | `edge/telegraf/targets_acuvim.txt` | Per-node | Move to `/etc/ovr/targets_acuvim.txt` (symlink). |
 | Generated meter configs | `edge/telegraf/telegraf.d/*.conf` | Per-node | Created by `edge/scripts/telegraf_discover_acuvim.sh`. |
-| GX dbus2prom maps | `edge/gx/map_fast.tsv`, `edge/gx/map_slow.tsv` | Per-node (GX) | Copied to `/data/overdrive/dbus2prom/` on GX. |
-| GX exporter script | `dbus2prom.py`, `gx/*` | Static | Deployed to GX via `/data/overdrive` + `/service`. |
+| GX dbus2prom maps | `edge/gx/map_fast.tsv`, `edge/gx/map_slow.tsv` | Per-node (GX) | Copied to `/data/ovr/dbus2prom/` on GX. |
+| GX exporter script | `dbus2prom.py`, `gx/*` | Static | Deployed to GX via `/data/ovr` + `/service`. |
 | Network NAT config | `edge/networking/ovru-netkit/vars.env` | Per-node | Edit per host before running `edge/networking/ovru-netkit/install.sh`. |

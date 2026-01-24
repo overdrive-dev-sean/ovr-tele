@@ -4,10 +4,10 @@ set -euo pipefail
 # Upgrade an edge node to a specific EDGE_VERSION.
 #
 # Example:
-#   sudo /opt/edge/scripts/edge/upgrade_edge.sh 1.2.3
+#   sudo /opt/ovr/edge/scripts/edge/upgrade_edge.sh 1.2.3
 #
 # Notes:
-# - Assumes the edge runtime directory is at /opt/edge (override with EDGE_DIR)
+# - Assumes the edge runtime directory is at /opt/ovr/edge (override with EDGE_DIR)
 # - Uses compose.release.yml in EDGE_DIR (override with COMPOSE_FILE)
 
 VERSION="${1:-}"
@@ -16,18 +16,13 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-EDGE_DIR="${EDGE_DIR:-/opt/edge}"
+EDGE_DIR="${EDGE_DIR:-/opt/ovr/edge}"
 COMPOSE_FILE="${COMPOSE_FILE:-compose.release.yml}"
 GHCR_OWNER="${GHCR_OWNER:-overdrive-dev-sean}"
 
 if [ ! -d "$EDGE_DIR" ]; then
-  # Back-compat fallback (older layout)
-  if [ -d "/opt/stack/edge" ]; then
-    EDGE_DIR="/opt/stack/edge"
-  else
-    echo "ERROR: Edge directory not found at $EDGE_DIR (and /opt/stack/edge missing)" >&2
-    exit 1
-  fi
+  echo "ERROR: Edge directory not found at $EDGE_DIR" >&2
+  exit 1
 fi
 
 cd "$EDGE_DIR"

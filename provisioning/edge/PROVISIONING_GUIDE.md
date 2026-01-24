@@ -32,7 +32,7 @@ Notes:
 1) Run the helper to bring up ethernet with systemd-networkd:
 
 ```
-sudo bash /opt/stack/provisioning/edge/bringup-network.sh
+sudo bash /opt/ovr/provisioning/edge/bringup-network.sh
 ```
 
 If you prefer to do it manually, use the steps below.
@@ -101,7 +101,7 @@ echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" | sudo tee /etc/resolv.conf
 5) Install packages once internet is up:
 
 ```
-sudo bash /opt/stack/provisioning/edge/install-packages.sh
+sudo bash /opt/ovr/provisioning/edge/install-packages.sh
 ```
 
 `install-packages.sh` can optionally run WiFi setup at the end.
@@ -119,14 +119,14 @@ let the WiFi setup step run once NetworkManager is installed.
 6) Optional: re-run WiFi config:
 
 ```
-sudo bash /opt/stack/provisioning/edge/setup-wifi.sh --ssid "YourSSID" --pass "YourPassword"
+sudo bash /opt/ovr/provisioning/edge/setup-wifi.sh --ssid "YourSSID" --pass "YourPassword"
 ```
 
 If you already have `/etc/ovr/firstboot.env` with `WIFI_SSID` and
 `WIFI_PASS`, you can just run:
 
 ```
-sudo bash /opt/stack/provisioning/edge/setup-wifi.sh
+sudo bash /opt/ovr/provisioning/edge/setup-wifi.sh
 ```
 
 ### Offline packages on the USB (optional)
@@ -155,7 +155,7 @@ On the node:
 echo "deb [trusted=yes] file:/cdrom/ovr/debs ./" | \
   sudo tee /etc/apt/sources.list.d/usb-local.list
 sudo apt-get update
-sudo bash /opt/stack/provisioning/edge/install-packages.sh
+sudo bash /opt/ovr/provisioning/edge/install-packages.sh
 ```
 
 ### Optional USB inputs
@@ -223,7 +223,7 @@ See `provisioning/edge/bootstrap.args.prompt` for a full template.
 
 ### Secrets (USB)
 
-To avoid plaintext in config files, put secrets on the USB under `overdrive/secrets/`:
+To avoid plaintext in config files, put secrets on the USB under `ovr/secrets/`:
 
 - `remote_write_password`
 - `event_api_key`
@@ -297,7 +297,7 @@ are excluded from cloud remote_write.
 To change the interval or exclusions, edit `/etc/ovr/stream_aggr.yml` and restart:
 
 ```bash
-cd /opt/edge
+cd /opt/ovr/edge
 sudo docker compose -f compose.dev.yml up -d
 # If running release compose:
 # sudo docker compose -f compose.release.yml up -d
@@ -347,7 +347,7 @@ sudo bash edge/networking/ovru-netkit/verify.sh
 Update `/etc/ovr/edge.env` or `/etc/ovr/targets.yml`, then restart:
 
 ```bash
-cd /opt/edge
+cd /opt/ovr/edge
 sudo docker compose -f compose.dev.yml up -d
 # If running release compose:
 # sudo docker compose -f compose.release.yml up -d

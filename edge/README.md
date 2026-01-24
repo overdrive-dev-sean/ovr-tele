@@ -40,9 +40,9 @@ For true reproducibility across a fleet, store pinned third-party images in git:
 Then on nodes, you can do:
 
 ```bash
-cd /opt/edge/edge
-sudo ln -sf /opt/edge/edge/pins/vX.Y.Z.env /etc/ovr/edge.env
-sudo ln -sf /etc/ovr/edge.env /opt/edge/edge/.env
+cd /opt/ovr/edge
+sudo ln -sf /opt/ovr/edge/pins/vX.Y.Z.env /etc/ovr/edge.env
+sudo ln -sf /etc/ovr/edge.env /opt/ovr/edge/.env
 sudo docker compose -f compose.release.yml up -d
 ```
 

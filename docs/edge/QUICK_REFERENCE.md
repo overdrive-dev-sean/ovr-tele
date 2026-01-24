@@ -146,7 +146,7 @@ curl 'http://localhost:8428/api/v1/query?query=ovr_event_active' | jq .
 
 ### Container Restart
 ```bash
-cd /opt/edge && docker compose -f compose.dev.yml restart events
+cd /opt/ovr/edge && docker compose -f compose.dev.yml restart events
 docker logs events -f
 ```
 

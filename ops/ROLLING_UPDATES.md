@@ -13,9 +13,9 @@ Maintain a simple mapping of node IDs to rings (example file):
 - `ops/rings/stable.txt`
 
 ## Standard upgrade command
-On a node (assuming `/opt/stack`):
+On a node (assuming `/opt/ovr`):
 ```bash
-cd /opt/edge
+cd /opt/ovr/edge
 EDGE_VERSION=1.2.3 GHCR_OWNER=<github_owner> docker compose -f compose.release.yml pull
 EDGE_VERSION=1.2.3 GHCR_OWNER=<github_owner> docker compose -f compose.release.yml up -d
 ```

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-INSTALL_DIR="/data/overdrive/dbus2prom"
+INSTALL_DIR="/data/ovr/dbus2prom"
 cd "${INSTALL_DIR}"
 
 export PYTHONPATH="/opt/victronenergy/dbus-systemcalc-py/ext/velib_python:${PYTHONPATH:-}"
