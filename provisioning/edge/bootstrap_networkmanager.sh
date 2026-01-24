@@ -10,6 +10,9 @@ fi
 
 LOG_PREFIX="[nm-bootstrap]"
 LOG_FILE="${LOG_FILE:-/var/log/ovr-firstboot.log}"
+ACUVIM_BRIDGE_NAME="${ACUVIM_BRIDGE_NAME:-acuvim}"
+ACUVIM_BRIDGE_ADDR="${ACUVIM_BRIDGE_ADDR:-10.10.4.1/24}"
+ACUVIM_BRIDGE_PORTS="${ACUVIM_BRIDGE_PORTS:-enp2s0 enp3s0 enp4s0}"
 
 append_log() {
   if [ -w "$LOG_FILE" ] || [ -w "$(dirname "$LOG_FILE")" ]; then
@@ -133,6 +136,18 @@ iface_exists() {
   [ -d "/sys/class/net/$1" ]
 }
 
+is_in_list() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    if [ "$item" = "$needle" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 find_conn_for_iface() {
   local ifname="$1"
   nmcli -t -f NAME,connection.interface-name connection show 2>/dev/null | \
@@ -190,6 +205,95 @@ ensure_conn() {
   nmcli connection up "$existing" >/dev/null 2>&1 || nmcli connection up "$conn_name" >/dev/null 2>&1 || true
 }
 
+ensure_bridge() {
+  local br="$1"
+  local addr="$2"
+  local existing=""
+
+  existing="$(find_conn_for_iface "$br")"
+  if [ -z "$existing" ]; then
+    if nmcli -t -f NAME connection show | grep -qx "$br"; then
+      existing="$br"
+    fi
+  fi
+
+  if [ -n "$existing" ] && [ "$existing" != "$br" ]; then
+    if ! nmcli -t -f NAME connection show | grep -qx "$br"; then
+      nmcli connection modify "$existing" connection.id "$br"
+      existing="$br"
+    fi
+  fi
+
+  if [ -n "$existing" ]; then
+    nmcli connection modify "$existing" \
+      connection.interface-name "$br" \
+      connection.autoconnect yes \
+      ipv4.method manual \
+      ipv4.addresses "$addr" \
+      ipv6.method ignore \
+      bridge.stp no
+    log "Updated bridge ${existing} (${br})"
+  else
+    nmcli connection add type bridge ifname "$br" con-name "$br" \
+      connection.autoconnect yes \
+      ipv4.method manual ipv4.addresses "$addr" \
+      ipv6.method ignore \
+      bridge.stp no
+    log "Created bridge ${br} (${addr})"
+  fi
+
+  nmcli connection up "$br" >/dev/null 2>&1 || true
+}
+
+ensure_bridge_slave() {
+  local ifname="$1"
+  local br="$2"
+  local conn_name="${ifname}-${br}"
+  local desired_name="$conn_name"
+
+  if ! iface_exists "$ifname"; then
+    log "Skipping ${ifname} (interface not present)"
+    return 0
+  fi
+
+  nmcli dev set "$ifname" managed yes >/dev/null 2>&1 || true
+  ip link set "$ifname" up >/dev/null 2>&1 || true
+
+  local existing=""
+  existing="$(find_conn_for_iface "$ifname")"
+  if [ -z "$existing" ]; then
+    if nmcli -t -f NAME connection show | grep -qx "$conn_name"; then
+      existing="$conn_name"
+    fi
+  fi
+
+  if [ -n "$existing" ]; then
+    if [ "$existing" != "$desired_name" ]; then
+      if ! nmcli -t -f NAME connection show | grep -qx "$desired_name"; then
+        nmcli connection modify "$existing" connection.id "$desired_name"
+        existing="$desired_name"
+      fi
+    fi
+    nmcli connection modify "$existing" \
+      connection.interface-name "$ifname" \
+      connection.autoconnect yes \
+      connection.master "$br" \
+      connection.slave-type bridge \
+      ipv4.method disabled \
+      ipv6.method ignore
+    log "Updated bridge slave ${existing} (${ifname} -> ${br})"
+  else
+    nmcli connection add type ethernet ifname "$ifname" con-name "$conn_name" \
+      connection.autoconnect yes \
+      connection.master "$br" \
+      connection.slave-type bridge \
+      ipv4.method disabled ipv6.method ignore
+    log "Created bridge slave ${conn_name} (${ifname} -> ${br})"
+  fi
+
+  nmcli connection up "$conn_name" >/dev/null 2>&1 || nmcli connection up "$existing" >/dev/null 2>&1 || true
+}
+
 validate() {
   echo ""
   echo "${LOG_PREFIX} Validation:"
@@ -210,7 +314,22 @@ main() {
 
   ensure_conn enp1s0 enp1s0-dhcp auto auto 1
 
+  local -a bridge_ports=()
+  if [ -n "${ACUVIM_BRIDGE_PORTS// }" ]; then
+    read -r -a bridge_ports <<< "$ACUVIM_BRIDGE_PORTS"
+  fi
+
+  if [ "${#bridge_ports[@]}" -gt 0 ]; then
+    ensure_bridge "$ACUVIM_BRIDGE_NAME" "$ACUVIM_BRIDGE_ADDR"
+    for dev in "${bridge_ports[@]}"; do
+      ensure_bridge_slave "$dev" "$ACUVIM_BRIDGE_NAME"
+    done
+  fi
+
   for dev in enp2s0 enp3s0 enp4s0 enp5s0 enp7s0; do
+    if is_in_list "$dev" "${bridge_ports[@]}"; then
+      continue
+    fi
     ensure_conn "$dev" "${dev}-noip" disabled ignore
   done
 
