@@ -723,8 +723,36 @@ ensure_acuvim_targets() {
 EOF
     chmod 0644 "${file}"
   fi
-  if [ ! -e "${EDGE_DIR}/telegraf/targets_acuvim.txt" ]; then
-    ln -s "${file}" "${EDGE_DIR}/telegraf/targets_acuvim.txt"
+}
+
+ensure_telegraf_dir() {
+  local src_dir="${EDGE_DIR}/telegraf/telegraf.d"
+  local dst_dir="${OVR_DIR}/telegraf.d"
+  mkdir -p "${dst_dir}"
+
+  if [ -d "${src_dir}" ] && [ -z "$(ls -A "${dst_dir}" 2>/dev/null)" ]; then
+    cp -a "${src_dir}/." "${dst_dir}/"
+    find "${dst_dir}" -type f -name '*.conf' -exec chmod 0644 {} \;
+  fi
+}
+
+install_gx_mqtt_refresh() {
+  local script_src="${EDGE_DIR}/scripts/refresh_gx_mqtt_sources.sh"
+  local script_dst="/usr/local/bin/ovr-refresh-gx-mqtt-sources"
+  local unit_src_dir="${EDGE_DIR}/systemd"
+  local unit_dst_dir="/etc/systemd/system"
+
+  if [ -f "${script_src}" ]; then
+    ln -sf "${script_src}" "${script_dst}"
+    chmod 0755 "${script_src}"
+  fi
+
+  if [ -f "${unit_src_dir}/ovr-refresh-gx-mqtt-sources.service" ] && \
+     [ -f "${unit_src_dir}/ovr-refresh-gx-mqtt-sources.timer" ]; then
+    cp "${unit_src_dir}/ovr-refresh-gx-mqtt-sources.service" "${unit_dst_dir}/"
+    cp "${unit_src_dir}/ovr-refresh-gx-mqtt-sources.timer" "${unit_dst_dir}/"
+    systemctl daemon-reload
+    systemctl enable --now ovr-refresh-gx-mqtt-sources.timer
   fi
 }
 
@@ -828,6 +856,8 @@ main() {
   generate_vmagent_config
   ensure_vmagent_remote_write_configs
   ensure_acuvim_targets
+  ensure_telegraf_dir
+  install_gx_mqtt_refresh
   deploy_stack
 
   echo "Bootstrap complete."

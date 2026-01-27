@@ -30,6 +30,7 @@ lsb-release
 lshw
 lsof
 mtr-tiny
+mosquitto-clients
 net-tools
 netcat-openbsd
 nethogs

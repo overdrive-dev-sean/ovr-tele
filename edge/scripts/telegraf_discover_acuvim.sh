@@ -5,7 +5,7 @@ umask 022
 EDGE_DIR="${EDGE_DIR:-/opt/ovr/edge}"
 OVR_DIR="${OVR_DIR:-/etc/ovr}"
 
-OUT_DIR="${EDGE_DIR}/telegraf/telegraf.d"
+OUT_DIR="${OVR_DIR}/telegraf.d"
 LIST="${OVR_DIR}/targets_acuvim.txt"
 TPL="${EDGE_DIR}/telegraf/templates/acuvim_modbus.tpl"
 
@@ -23,6 +23,8 @@ if [ ! -f "${LIST}" ]; then
   echo "ERROR: Missing IP list ${LIST}" >&2
   exit 1
 fi
+
+mkdir -p "${OUT_DIR}"
 
 is_up() {
   local ip="$1"
