@@ -16,11 +16,14 @@ services:
     container_name: node-exporter
     command:
       - '--path.rootfs=/host'
-    network_mode: host
     pid: host
     restart: unless-stopped
     volumes:
       - '/:/host:ro,rslave'
+    networks:
+      default:
+        aliases:
+          - node_exporter
   vmagent:
     image: victoriametrics/vmagent:latest
     container_name: vmagent
@@ -33,8 +36,6 @@ services:
       - /entrypoint.sh
     ports:
       - "8429:8429"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ./vmagent/entrypoint.sh:/entrypoint.sh:ro
       - /etc/ovr/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro
@@ -75,8 +76,6 @@ services:
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - ./telegraf/telegraf.d:/etc/telegraf/telegraf.d:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     command:
       - telegraf
       - --config

@@ -7,8 +7,8 @@ Create a technical architecture diagram for an industrial telemetry system with 
 
 TOP SECTION - DATA SOURCES (left to right):
 1. Box labeled "Victron GX Device" (Venus OS logo style) at IP 192.168.100.2
-   - Contains: "dbus2prom.py" service
-   - Two ports: ":9480 (500ms)" and ":9481 (5s)"
+   - Contains: "MQTT broker" service
+   - Port: ":1883"
    - Use orange/blue colors
 
 2. Box labeled "Acuvim Power Meters" (multiple meters)
@@ -25,11 +25,11 @@ TOP SECTION - DATA SOURCES (left to right):
 MIDDLE SECTION - COLLECTION LAYER:
 1. Box labeled "vmagent"
    - Port: :8429
-   - Arrow from Victron showing "Prometheus scrape"
    - Arrow from node-exporter
 
 2. Box labeled "Telegraf"
    - Tag: "network_mode: host"
+   - Arrow from Victron showing "MQTT subscribe"
    - Arrow from Acuvim meters showing "Modbus TCP poll"
    - Label arrow: "InfluxDB line protocol"
 
@@ -89,12 +89,12 @@ If using a manual diagramming tool, here's the structure:
 │ Victron GX      │  │ Acuvim Meters   │  │ N100 System │
 │ 192.168.100.2   │  │ 10.10.4.x       │  │             │
 │                 │  │                 │  │             │
-│ dbus2prom.py    │  │ [Meter Icons]   │  │ node-exp    │
-│ :9480 :9481     │  │ Modbus :502     │  │ :9100       │
+│ MQTT broker     │  │ [Meter Icons]   │  │ node-exp    │
+│ :1883           │  │ Modbus :502     │  │ :9100       │
 └────────┬────────┘  └────────┬────────┘  └──────┬──────┘
          │                    │                   │
-         │ Prometheus         │ Modbus TCP        │ Prometheus
-         │ scrape             │ poll              │ scrape
+         │ MQTT               │ Modbus TCP        │ Prometheus
+         │ subscribe          │ poll              │ scrape
          ▼                    ▼                   ▼
 ```
 
@@ -156,7 +156,7 @@ If using a manual diagramming tool, here's the structure:
 ```mermaid
 graph LR
     subgraph Sources["Data Sources"]
-        GX["Victron GX<br/>192.168.100.2<br/>dbus2prom :9480/:9481"]
+        GX["Victron GX<br/>192.168.100.2<br/>MQTT :1883"]
         ACU["Acuvim Meters<br/>10.10.4.x<br/>Modbus :502"]
         NODE["N100 Host<br/>node-exporter :9100"]
     end
@@ -178,7 +178,7 @@ graph LR
         TS["Tailscale VPN"]
     end
     
-    GX -->|"Prometheus scrape<br/>500ms & 5s"| VMAGENT
+    GX -->|"MQTT subscribe"| TELEGRAF
     ACU -->|"Modbus TCP poll<br/>100ms"| TELE
     NODE -->|"Prometheus scrape<br/>5s"| VMAGENT
     
@@ -207,8 +207,8 @@ graph LR
          Data Sources              Collection           Storage         Viz
     
     ┌──────────────┐              ┌──────────┐       ┌──────────┐   ┌─────────┐
-    │ Victron GX   │─scrape 500ms→│ vmagent  │──────→│Victoria  │──→│ Grafana │
-    │ :9480/:9481  │              │  :8429   │remote │ Metrics  │ DS│  :3000  │
+    │ Victron GX   │─MQTT sub ───→│ vmagent  │──────→│Victoria  │──→│ Grafana │
+    │ :1883       │              │  :8429   │remote │ Metrics  │ DS│  :3000  │
     └──────────────┘              └──────────┘write  │  :8428   │   └─────────┘
                                                       └──────────┘
     ┌──────────────┐              ┌──────────┐           ↑
@@ -221,7 +221,7 @@ graph LR
     │ :9100        │              │          │
     └──────────────┘              └──────────┘
     
-         LAN: 192.168.100.0/30 (GX)
+         LAN: 192.168.100.0/30
               ↓ NAT
          Multi-WAN: LTE + WiFi
               ↓

@@ -173,7 +173,7 @@ They are not applied automatically unless you run the scripts manually.
 - `LAN_IF`, `LAN_MODE`, `LAN_IP`, `LAN_GW`, `LAN_DNS`
 - `WIFI_SSID`, `WIFI_PASS`, `WIFI_PASS_FILE`, `WIFI_IF`
 - `ALLOWED_TCP_PORTS` (comma-separated)
-- `EVENT_API_KEY_FILE`, `GX_PASSWORD_FILE` (passed through to bootstrap)
+- `EVENT_API_KEY_FILE` (passed through to bootstrap)
 - `VM_WRITE_URL`, `VM_QUERY_URL`, `VM_WRITE_URL_SECONDARY`, `VM_WRITE_USERNAME`, `VM_WRITE_PASSWORD_FILE`
 - `RUN_WIFI_SETUP=0` to skip WiFi drivers/tools + WiFi config
 - `RUN_PACKAGE_INSTALL=0` to skip installing base packages at first boot
@@ -200,10 +200,6 @@ https://metrics.example.com/api/v1/write
 ovr
 --remote-write-password-file
 /etc/ovr/secrets/remote_write_password
---has-gx
-true
---gx-host
-venus-123.local
 ```
 
 To prompt for values at first boot, use `?` on the value line:
@@ -227,7 +223,6 @@ To avoid plaintext in config files, put secrets on the USB under `ovr/secrets/`:
 
 - `remote_write_password`
 - `event_api_key`
-- `gx_password`
 - `wifi_password`
 - `vm_write_password`
 
@@ -236,7 +231,7 @@ These are copied to `/etc/ovr/secrets/` during install. Use file paths in
 
 ## Per-node files
 
-- `/etc/ovr/edge.env` (identity + remote write + GX credentials)
+- `/etc/ovr/edge.env` (identity + remote write)
 - `/etc/ovr/targets.yml` (vmagent scrape targets)
 - `/etc/ovr/targets_acuvim.txt` (Modbus meters list)
 - `/etc/ovr/stream_aggr.yml` (cloud downsample config for vmagent)
@@ -258,14 +253,10 @@ sudo bash provisioning/edge/bootstrap_n100.sh \
   --lan-mode dhcp \
   --lan-if enp3s0 \
   --remote-write-url https://metrics.example.com/api/v1/write \
-  --remote-write-user ovr \
-  --has-gx=true \
-  --gx-host venus-123.local
+  --remote-write-user ovr
 ```
 
-If you do not have a GX, set `--has-gx=false` and omit the GX flags.
-
-If you re-run bootstrap without providing optional flags (like `--gx-password`),
+If you re-run bootstrap without providing optional flags,
 it preserves any existing values from `/etc/ovr/edge.env`.
 
 ## Targets
@@ -276,7 +267,7 @@ You can supply targets explicitly:
 sudo bash provisioning/edge/bootstrap_n100.sh \
   --deployment-id fleet \
   --node-id n100-01 \
-  --targets "gx_fast=venus-123.local:9480,gx_slow=venus-123.local:9481,node_exporter=host.docker.internal:9100"
+  --targets "node_exporter=node_exporter:9100,event_service=events:8088"
 ```
 
 Or provide a full file:
@@ -316,14 +307,11 @@ EOF
 sudo bash edge/scripts/telegraf_discover_acuvim.sh
 ```
 
-## GX networking
+## LAN networking
 
-If you need one-client DHCP + NAT for the GX port, use the existing `edge/networking/ovru-netkit` flow.
-For multi-port role assignment (GX + WAN + Modbus), use `edge/networking/ovru-netkit/configure-ports.sh`.
-Standard deployments with a service router should set `GX_ENABLE=0` and use WAN DHCP + Modbus static /24.
-
-Note: mDNS does not cross subnets. Ensure router LAN/Wi-Fi is the same subnet and disable client isolation
-if you want GX hostnames (e.g. `venus-123.local`) to resolve.
+If you need one-client DHCP + NAT for a LAN port, use the existing
+`edge/networking/ovru-netkit` flow. For multi-port role assignment (LAN + WAN + Modbus),
+use `edge/networking/ovru-netkit/configure-ports.sh`.
 
 ```bash
 sudo vim edge/networking/ovru-netkit/vars.env

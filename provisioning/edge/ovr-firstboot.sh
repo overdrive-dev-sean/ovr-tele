@@ -992,24 +992,6 @@ run_bootstrap() {
     if [ -n "${EVENT_API_KEY_FILE:-}" ]; then
       args+=(--event-api-key-file "$EVENT_API_KEY_FILE")
     fi
-    if [ -n "${HAS_GX:-}" ]; then
-      args+=(--has-gx "$HAS_GX")
-    fi
-    if [ -n "${GX_HOST:-}" ]; then
-      args+=(--gx-host "$GX_HOST")
-    fi
-    if [ -n "${GX_PORT:-}" ]; then
-      args+=(--gx-port "$GX_PORT")
-    fi
-    if [ -n "${GX_USER:-}" ]; then
-      args+=(--gx-user "$GX_USER")
-    fi
-    if [ -n "${GX_PASSWORD:-}" ]; then
-      args+=(--gx-password "$GX_PASSWORD")
-    fi
-    if [ -n "${GX_PASSWORD_FILE:-}" ]; then
-      args+=(--gx-password-file "$GX_PASSWORD_FILE")
-    fi
   fi
 
   if [ ! -x "$BOOTSTRAP_SCRIPT" ]; then

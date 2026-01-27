@@ -14,19 +14,6 @@ docker logs events --tail 50
 curl http://localhost:8088/health
 ```
 
-### GX Exporter Scripts (on GX device)
-The GX runs two dbus2prom exporters: fast (9480) and slow (9481).
-
-```bash
-# Restart both exporters on GX
-/data/dbus2prom/run_exporters.sh
-
-# Quick health check (BusyBox-safe)
-busybox netstat -ltn | grep -E ':(9480|9481)\b'
-curl -fsS -m 2 http://127.0.0.1:9480/metrics | head -n 5
-curl -fsS -m 2 http://127.0.0.1:9481/metrics | head -n 5
-```
-
 ### Start Event
 ```bash
 curl -X POST https://events.yourdomain.com/api/event/start \
@@ -119,7 +106,6 @@ victron_dc_voltage_v{}
 - **Real-time metrics**: SOC (10s), Alerts/Pin/Pout (1s update intervals)
 - **Multi-logger support**: Manage multiple services per event
 - **Notes system**: Service-tagged notes with bulk delete (stored in SQLite)
-- **GX control**: Adjust inverter settings via SSH (reads from VictoriaMetrics)
 - **Responsive design**: Mobile-first, touch-friendly interface
 
 ## Troubleshooting

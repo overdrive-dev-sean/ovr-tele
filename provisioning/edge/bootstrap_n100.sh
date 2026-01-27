@@ -45,9 +45,6 @@ TARGETS_FILE=""
 TARGETS_INLINE=()
 TARGETS_INLINE_RAW=""
 
-HAS_GX=""
-GX_HOST=""
-
 PROMPT_ALL="${PROMPT_ALL:-1}"
 COMPOSE_CMD=()
 
@@ -90,10 +87,6 @@ Map tiles:
 Targets:
   --targets <job=host:port[,job=host:port]>
   --targets-file <path>
-
-GX (optional):
-  --has-gx true|false (or --has-gx=true|false)
-  --gx-host <hostname-or-ip>
 
 Other:
   --no-prompt                Disable interactive prompts
@@ -175,20 +168,6 @@ parse_args() {
         shift 2
         ;;
       --targets-file) TARGETS_FILE="$2"; shift 2 ;;
-      --has-gx=*)
-        HAS_GX="${1#*=}"
-        shift
-        ;;
-      --has-gx)
-        if [ -n "${2:-}" ] && [ "${2#--}" = "${2}" ]; then
-          HAS_GX="$2"
-          shift 2
-        else
-          HAS_GX="true"
-          shift
-        fi
-        ;;
-      --gx-host) GX_HOST="$2"; shift 2 ;;
       --no-prompt) PROMPT_ALL=0; shift ;;
       -h|--help) usage; exit 0 ;;
       *) echo "ERROR: Unknown argument: $1" >&2; usage; exit 1 ;;
@@ -226,7 +205,6 @@ load_existing_defaults() {
     preserve_if_empty VM_WRITE_PASSWORD VM_WRITE_PASSWORD "${existing_env}"
     preserve_if_empty MAPBOX_TOKEN MAPBOX_TOKEN "${existing_env}"
     preserve_if_empty MAPBOX_TOKEN_FILE MAPBOX_TOKEN_FILE "${existing_env}"
-    preserve_if_empty GX_HOST GX_HOST "${existing_env}"
     preserve_if_empty GHCR_OWNER GHCR_OWNER "${existing_env}"
     preserve_if_empty EDGE_VERSION EDGE_VERSION "${existing_env}"
     preserve_if_empty EDGE_GIT_SHA EDGE_GIT_SHA "${existing_env}"
@@ -477,19 +455,6 @@ prompt_for_values() {
   fi
 
   echo ""
-  echo "== GX (optional) =="
-  local gx_default="false"
-  if [ "${HAS_GX}" = "true" ] || [ -n "${GX_HOST}" ]; then
-    gx_default="true"
-  fi
-  prompt_bool HAS_GX "Is a GX device attached?" \
-    "Set this to true when a GX device is connected to the GX port." "${gx_default}"
-  if [ "${HAS_GX}" = "true" ]; then
-    prompt_optional GX_HOST "GX host" \
-      "GX hostname or IP address (optional)." "${GX_HOST}"
-  fi
-
-  echo ""
   echo "== Targets (optional) =="
   prompt_optional TARGETS_FILE "Targets file" \
     "Override targets.yml with a full file path (leave blank to skip)." "${TARGETS_FILE}"
@@ -673,70 +638,14 @@ VM_REMOTE_WRITE_PASSWORD_FILE=${REMOTE_WRITE_PASSWORD_FILE:-${OVR_DIR}/secrets/r
 
 MAPBOX_TOKEN=${MAPBOX_TOKEN}
 MAPBOX_TOKEN_FILE=${MAPBOX_TOKEN_FILE:-${OVR_DIR}/secrets/mapbox_token}
-
-GX_HOST=${GX_HOST}
-GX_SSH_PORT=
-GX_USER=root
-GX_PASSWORD_FILE=${OVR_DIR}/secrets/gx_password
 EOF
   } > "${env_file}"
 
   chmod 0600 "${env_file}"
 }
 
-sanitize_host_label() {
-  local host="$1"
-  local value="$host"
-  local stripped=""
-
-  if [[ "$value" =~ ^\\[(.*)\\](:[0-9]+)?$ ]]; then
-    value="${BASH_REMATCH[1]}"
-  fi
-
-  if [[ "$value" =~ ^[^:]+:[0-9]+$ ]]; then
-    value="${value%:*}"
-  fi
-
-  while [ -n "$value" ] && [ "${value##*.}" = "" ]; do
-    value="${value%.}"
-  done
-
-  if [[ "$value" =~ ^[0-9]+(\\.[0-9]+){3}$ ]]; then
-    printf '%s' "$value"
-    return 0
-  fi
-
-  if [[ "$value" == *.* ]]; then
-    value="${value%%.*}"
-  fi
-
-  stripped="$value"
-  printf '%s' "$stripped"
-}
-
-strip_host_port() {
-  local host="$1"
-  local value="$host"
-
-  if [[ "$value" =~ ^\\[.*\\]:[0-9]+$ ]]; then
-    value="${value#\\[}"
-    value="${value%\\]:*}"
-  elif [[ "$value" =~ ^[^:]+:[0-9]+$ ]]; then
-    value="${value%:*}"
-  fi
-
-  printf '%s' "$value"
-}
-
 generate_targets() {
   mkdir -p "${OVR_DIR}"
-  local gx_hostname=""
-  local gx_target_host=""
-
-  if [ -n "${GX_HOST}" ]; then
-    gx_target_host="$(strip_host_port "${GX_HOST}")"
-    gx_hostname="$(sanitize_host_label "${gx_target_host}")"
-  fi
 
   if [ -n "${TARGETS_FILE}" ]; then
     cp "${TARGETS_FILE}" "${OVR_DIR}/targets.yml"
@@ -751,83 +660,32 @@ generate_targets() {
         if [ -z "${job}" ] || [ -z "${target}" ]; then
           continue
         fi
-        local system_id="${NODE_ID}"
-        local gx_host_label=""
-        if [ "${job}" = "gx_fast" ] || [ "${job}" = "gx_slow" ]; then
-          if [ -n "${gx_hostname}" ]; then
-            system_id="${gx_hostname}"
-          else
-            local target_host
-            target_host="$(strip_host_port "${target}")"
-            system_id="$(sanitize_host_label "${target_host}")"
-            gx_host_label="${target_host}"
-          fi
-          if [ -z "${gx_host_label}" ]; then
-            gx_host_label="${gx_target_host}"
-          fi
-        fi
         cat <<EOF
 - targets:
     - "${target}"
   labels:
     job: ${job}
-    system_id: "${system_id}"
-    node_id: "${NODE_ID}"
 EOF
-        if [ -n "${gx_host_label}" ]; then
-          cat <<EOF
-    gx_host: "${gx_host_label}"
-
-EOF
-        else
-          echo ""
-        fi
+        echo ""
       done
     } > "${OVR_DIR}/targets.yml"
     return 0
   fi
 
-  if [ -n "${GX_HOST}" ] && [ -f "${EDGE_DIR}/examples/targets.yml.example" ]; then
-    sed \
-      -e "s/__NODE_ID__/${NODE_ID}/g" \
-      -e "s/__GX_HOST__/${gx_target_host}/g" \
-      -e "s/__GX_HOSTNAME__/${gx_hostname}/g" \
-      "${EDGE_DIR}/examples/targets.yml.example" \
-      > "${OVR_DIR}/targets.yml"
+  if [ -f "${EDGE_DIR}/examples/targets.yml.example" ]; then
+    cp "${EDGE_DIR}/examples/targets.yml.example" "${OVR_DIR}/targets.yml"
   else
     cat > "${OVR_DIR}/targets.yml" <<EOF
 - targets:
-    - "host.docker.internal:9100"
+    - "node_exporter:9100"
   labels:
     job: node_exporter
-    system_id: "${NODE_ID}"
-    node_id: "${NODE_ID}"
 
 - targets:
     - "events:8088"
   labels:
     job: event_service
-    system_id: "${NODE_ID}"
-    node_id: "${NODE_ID}"
 EOF
-    if [ -n "${GX_HOST}" ]; then
-      cat >> "${OVR_DIR}/targets.yml" <<EOF
-
-- targets:
-    - "${gx_target_host}:9480"
-  labels:
-    job: gx_fast
-    system_id: "${gx_hostname}"
-    gx_host: "${gx_target_host}"
-
-- targets:
-    - "${gx_target_host}:9481"
-  labels:
-    job: gx_slow
-    system_id: "${gx_hostname}"
-    gx_host: "${gx_target_host}"
-EOF
-    fi
   fi
 }
 
@@ -887,13 +745,6 @@ check_required_files() {
 
   if [ -n "${MAPBOX_TOKEN_FILE}" ] && [ ! -f "${MAPBOX_TOKEN_FILE}" ]; then
     missing+=("${MAPBOX_TOKEN_FILE} (mapbox token)")
-  fi
-
-  if [ "${HAS_GX}" = "true" ]; then
-    local gx_file="${OVR_DIR}/secrets/gx_password"
-    if [ ! -f "${gx_file}" ]; then
-      missing+=("${gx_file} (GX password)")
-    fi
   fi
 
   if [ "${#missing[@]}" -gt 0 ]; then
@@ -968,10 +819,6 @@ main() {
   need "${NODE_ID}" "--node-id is required."
 
 
-  if [ -z "${HAS_GX}" ]; then
-    HAS_GX="false"
-  fi
-
   configure_network
   install_deps
   write_edge_env
@@ -982,14 +829,6 @@ main() {
   ensure_vmagent_remote_write_configs
   ensure_acuvim_targets
   deploy_stack
-
-  if [ "${HAS_GX}" = "true" ]; then
-    if [ -z "${GX_HOST}" ]; then
-      echo "WARNING: --gx-host not set. GX deployment is pending."
-    else
-      echo "GX detected. You can deploy the exporter using: ${EDGE_DIR}/gx/install_dbus_exporter.sh"
-    fi
-  fi
 
   echo "Bootstrap complete."
 }

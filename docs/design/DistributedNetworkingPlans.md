@@ -25,9 +25,6 @@ Each N100 scrapes Prometheus metrics from neighboring nodes directly.
 │  │ (scrape)     │    │ Metrics       │  │
 │  └──────────────┘    └───────────────┘  │
 │         │                                │
-│         ├─→ Local: localhost:9480       │
-│         ├─→ Neighbor: node-002:9480     │
-│         ├─→ Neighbor: node-003:9480     │
 │         └─→ ... (48 more targets)       │
 └─────────────────────────────────────────┘
 ```
@@ -35,14 +32,11 @@ Each N100 scrapes Prometheus metrics from neighboring nodes directly.
 #### Implementation
 **edge/vmagent/scrape.yml additions:**
 ```yaml
-- job_name: 'neighbor_gx_fast'
   scrape_interval: 5s
   scrape_timeout: 3s
   static_configs:
     - targets:
       # Discovered via mDNS/DNS-SD or static
-      - 'node-002.mesh.local:9480'
-      - 'node-003.mesh.local:9480'
       # ... all 50 nodes
   relabel_configs:
     - source_labels: [__address__]
@@ -58,7 +52,6 @@ Each N100 scrapes Prometheus metrics from neighboring nodes directly.
       regex: 'victron_(battery_soc|dc_voltage|dc_current|ac_.*_l1_power)'
       action: keep
   static_configs:
-    - targets: ['node-002.mesh.local:9480', ...]
 ```
 
 #### Bandwidth Calculation
@@ -184,7 +177,6 @@ bridge_attempt_unsubscribe false
 #!/usr/bin/env python3
 """
 Bridge dbus2prom HTTP metrics to MQTT topics.
-Scrapes localhost:9480 (fast) every 1-2s, publishes critical metrics.
 """
 
 import os
@@ -194,7 +186,6 @@ import requests
 import paho.mqtt.client as mqtt
 from prometheus_client.parser import text_string_to_metric_families
 
-SCRAPE_URL = os.environ.get("SCRAPE_URL", "http://localhost:9480/metrics")
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 NODE_ID = os.environ.get("NODE_ID", "node001")
@@ -220,7 +211,6 @@ client.loop_start()
 
 def scrape_and_publish():
     try:
-        resp = requests.get(SCRAPE_URL, timeout=2)
         resp.raise_for_status()
         
         # Parse Prometheus text format
@@ -262,12 +252,10 @@ while True:
     depends_on:
       - mosquitto
     environment:
-      - SCRAPE_URL=http://host.docker.internal:9480/metrics
       - MQTT_BROKER=mosquitto
       - NODE_ID=${NODE_ID:-node001}
       - PUBLISH_INTERVAL=2.0
     extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 ```
 

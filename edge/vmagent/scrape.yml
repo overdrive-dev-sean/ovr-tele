@@ -6,28 +6,6 @@ global:
     node_id: "__NODE_ID__"
 
 scrape_configs:
-  - job_name: gx_fast
-    scrape_interval: 500ms
-    scrape_timeout: 400ms
-    file_sd_configs:
-      - files:
-          - /etc/ovr/targets.yml
-    relabel_configs:
-      - source_labels: [job]
-        regex: gx_fast
-        action: keep
-
-  - job_name: gx_slow
-    scrape_interval: 5s
-    scrape_timeout: 4s
-    file_sd_configs:
-      - files:
-          - /etc/ovr/targets.yml
-    relabel_configs:
-      - source_labels: [job]
-        regex: gx_slow
-        action: keep
-
   - job_name: node_exporter
     scrape_interval: 5s
     scrape_timeout: 4s
