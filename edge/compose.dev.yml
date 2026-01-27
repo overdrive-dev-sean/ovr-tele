@@ -36,6 +36,9 @@ services:
       - /entrypoint.sh
     ports:
       - "8429:8429"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./vmagent/entrypoint.sh:/entrypoint.sh:ro
       - /etc/ovr/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro
@@ -73,6 +76,9 @@ services:
     network_mode: host
     env_file:
       - .env
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
       - /etc/ovr/telegraf.d:/etc/telegraf/telegraf.d:ro
