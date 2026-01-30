@@ -22,7 +22,7 @@ This directory is the recommended place to store those pins *per edge release*.
 On a node where the stack is running and known-good:
 
 ```bash
-cd /opt/edge
+cd /opt/ovr
 ./scripts/pin_third_party_images.sh edge edge/compose.dev.yml
 ```
 

@@ -5,6 +5,9 @@ import re
 import sqlite3
 import threading
 import time
+import hashlib
+import uuid
+import html as html_lib
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -20,15 +23,20 @@ from map_tiles import (
     init_map_tables,
     set_preferred_provider,
     get_preferred_provider,
-    build_guardrail_status,
+    build_tile_policy,
     is_valid_provider,
+    record_tile_usage,
+    get_tile_usage_totals,
 )
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
 VM_URL = os.getenv("FLEET_VM_URL", "http://victoria-metrics:8428").rstrip("/")
-METRIC_SUFFIX = os.getenv("FLEET_METRIC_SUFFIX", ":avg")
+VM_WRITE_URL = os.getenv(
+    "FLEET_VM_WRITE_URL", "http://victoria-metrics:8428/write"
+).strip()
+METRIC_SUFFIX = os.getenv("FLEET_METRIC_SUFFIX", ":10s_avg")
 DEPLOYMENT_ID = os.getenv("FLEET_DEPLOYMENT_ID", "").strip()
 NODE_URL_TEMPLATE = os.getenv("FLEET_NODE_URL_TEMPLATE", "").strip()
 NODE_DOMAIN = os.getenv("FLEET_NODE_DOMAIN", "").strip()
@@ -57,6 +65,16 @@ ESRI_MAX_ZOOM = int(os.getenv("ESRI_MAX_ZOOM", "19"))
 MAPBOX_FREE_TILES_PER_MONTH = int(os.getenv("MAPBOX_FREE_TILES_PER_MONTH", "750000"))
 ESRI_FREE_TILES_PER_MONTH = int(os.getenv("ESRI_FREE_TILES_PER_MONTH", "2000000"))
 GUARDRAIL_LIMIT_PCT = float(os.getenv("GUARDRAIL_LIMIT_PCT", "0.95"))
+MAP_TILE_LIMIT_MAPBOX = int(
+    os.getenv("MAP_TILE_LIMIT_MAPBOX", str(MAPBOX_FREE_TILES_PER_MONTH))
+)
+MAP_TILE_LIMIT_ESRI = int(
+    os.getenv("MAP_TILE_LIMIT_ESRI", str(ESRI_FREE_TILES_PER_MONTH))
+)
+MAP_TILE_SWITCH_THRESHOLD = float(
+    os.getenv("MAP_TILE_SWITCH_THRESHOLD", str(GUARDRAIL_LIMIT_PCT))
+)
+MAP_TILE_DISABLE_THRESHOLD = float(os.getenv("MAP_TILE_DISABLE_THRESHOLD", "1.0"))
 MAP_TILES_LOOKBACK_SECONDS = int(
     os.getenv("FLEET_MAP_TILES_LOOKBACK_SECONDS", str(LOOKBACK_SECONDS))
 )
@@ -108,6 +126,38 @@ CREATE TABLE IF NOT EXISTS manual_locations (
   label TEXT,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+  event_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS events_registry (
+  event_id TEXT PRIMARY KEY,
+  event_name TEXT NOT NULL,
+  event_name_norm TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_registry_name_norm
+  ON events_registry(event_name_norm);
+CREATE TABLE IF NOT EXISTS event_nodes (
+  event_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  joined_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  PRIMARY KEY (event_id, node_id)
+);
+CREATE TABLE IF NOT EXISTS event_aliases (
+  event_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  temp_event_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (event_id, node_id, temp_event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_event_aliases_temp ON event_aliases (temp_event_id);
 """
 
 
@@ -127,6 +177,367 @@ def _init_db() -> None:
 
 _init_db()
 
+
+# ============================================================================
+# Cloud event storage
+# ============================================================================
+
+EVENT_STATUSES = {"active", "ended"}
+
+
+def _event_timestamp() -> int:
+    return int(time.time())
+
+
+def _generate_event_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _event_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "event_id": row["event_id"],
+        "name": row["name"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "ended_at": row["ended_at"],
+    }
+
+
+def _list_events(status: str = "active") -> List[Dict[str, Any]]:
+    if status not in {"active", "ended", "all"}:
+        status = "active"
+    query = "SELECT event_id, name, status, created_at, ended_at FROM events"
+    params: List[Any] = []
+    if status != "all":
+        query += " WHERE status = ?"
+        params.append(status)
+    query += " ORDER BY created_at DESC"
+    with _get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_event_row(row) for row in rows]
+
+
+def _get_event(event_id: str) -> Optional[Dict[str, Any]]:
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT event_id, name, status, created_at, ended_at FROM events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if not row:
+            return None
+        event = _event_row(row)
+        nodes = conn.execute(
+            "SELECT node_id, joined_at, ended_at FROM event_nodes WHERE event_id = ? ORDER BY joined_at DESC",
+            (event_id,),
+        ).fetchall()
+    event["nodes"] = [
+        {"node_id": node["node_id"], "joined_at": node["joined_at"], "ended_at": node["ended_at"]}
+        for node in nodes
+    ]
+    return event
+
+
+def _create_event(name: str) -> Dict[str, Any]:
+    event_id = _generate_event_id()
+    created_at = _event_timestamp()
+    with _get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO events (event_id, name, status, created_at, ended_at)
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (event_id, name, "active", created_at),
+        )
+        conn.commit()
+    return {
+        "event_id": event_id,
+        "name": name,
+        "status": "active",
+        "created_at": created_at,
+        "ended_at": None,
+    }
+
+
+def _end_event(event_id: str) -> Optional[Dict[str, Any]]:
+    ended_at = _event_timestamp()
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT event_id, name, status, created_at, ended_at FROM events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE events SET status = ?, ended_at = ? WHERE event_id = ?",
+            ("ended", ended_at, event_id),
+        )
+        conn.commit()
+    event = _event_row(row)
+    event["status"] = "ended"
+    event["ended_at"] = ended_at
+    return event
+
+
+def _add_event_node(event_id: str, node_id: str) -> bool:
+    joined_at = _event_timestamp()
+    with _get_db() as conn:
+        existing = conn.execute(
+            "SELECT node_id FROM event_nodes WHERE event_id = ? AND node_id = ?",
+            (event_id, node_id),
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute(
+            """
+            INSERT INTO event_nodes (event_id, node_id, joined_at, ended_at)
+            VALUES (?, ?, ?, NULL)
+            """,
+            (event_id, node_id, joined_at),
+        )
+        conn.commit()
+    return True
+
+
+def _end_event_node(event_id: str, node_id: str) -> bool:
+    ended_at = _event_timestamp()
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT node_id FROM event_nodes WHERE event_id = ? AND node_id = ?",
+            (event_id, node_id),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE event_nodes SET ended_at = ? WHERE event_id = ? AND node_id = ?",
+            (ended_at, event_id, node_id),
+        )
+        conn.commit()
+    return True
+
+
+def _add_event_alias(event_id: str, node_id: str, temp_event_id: str) -> None:
+    created_at = _event_timestamp()
+    with _get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO event_aliases (event_id, node_id, temp_event_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (event_id, node_id, temp_event_id, created_at),
+        )
+        conn.commit()
+
+
+def _load_event_alias_map() -> Dict[tuple[str, str], str]:
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT event_id, node_id, temp_event_id FROM event_aliases"
+        ).fetchall()
+    return {
+        (row["temp_event_id"], row["node_id"]): row["event_id"]
+        for row in rows
+    }
+
+
+def _alias_temp_event_ids() -> set[str]:
+    with _get_db() as conn:
+        rows = conn.execute("SELECT temp_event_id FROM event_aliases").fetchall()
+    return {row["temp_event_id"] for row in rows if row["temp_event_id"]}
+
+# ============================================================================
+# Event Registry
+# ============================================================================
+
+_EVENT_NAME_SPACE_RE = re.compile(r"\s+")
+
+
+def _clean_event_name(value: Any) -> str:
+    if value is None:
+        return ""
+    return _EVENT_NAME_SPACE_RE.sub(" ", str(value).strip())
+
+
+def _normalize_event_name(value: Any) -> str:
+    return _clean_event_name(value).lower()
+
+
+def _parse_event_timestamp(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        ts = int(float(value))
+    except Exception:
+        return None
+    if ts <= 0:
+        return None
+    if ts > 1_000_000_000_000_000:
+        return int(ts / 1_000_000_000)
+    if ts > 1_000_000_000_000:
+        return int(ts / 1_000)
+    return ts
+
+
+def _event_registry_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "event_id": row["event_id"],
+        "event_name": row["event_name"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "ended_at": row["ended_at"],
+    }
+
+
+def _event_registry_status(entry: Dict[str, Any]) -> str:
+    return "ended" if entry.get("ended_at") else "active"
+
+
+def _get_event_registry(event_id: str) -> Optional[Dict[str, Any]]:
+    with _get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT event_id, event_name, created_at, started_at, ended_at
+            FROM events_registry WHERE event_id = ?
+            """,
+            (event_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return _event_registry_row(row)
+
+
+def _get_event_registry_by_norm(name_norm: str) -> Optional[Dict[str, Any]]:
+    if not name_norm:
+        return None
+    with _get_db() as conn:
+        row = conn.execute(
+            """
+            SELECT event_id, event_name, created_at, started_at, ended_at
+            FROM events_registry WHERE event_name_norm = ?
+            """,
+            (name_norm,),
+        ).fetchone()
+    if not row:
+        return None
+    return _event_registry_row(row)
+
+
+def _list_event_registry(
+    status: str = "all",
+    event_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    clauses: List[str] = []
+    params: List[Any] = []
+    if event_id:
+        clauses.append("event_id = ?")
+        params.append(event_id)
+    if status == "active":
+        clauses.append("ended_at IS NULL")
+    elif status == "ended":
+        clauses.append("ended_at IS NOT NULL")
+    query = """
+        SELECT event_id, event_name, created_at, started_at, ended_at
+        FROM events_registry
+    """
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY started_at DESC, created_at DESC"
+    with _get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_event_registry_row(row) for row in rows]
+
+
+def _event_registry_lookup(event_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not event_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(event_ids))
+    query = f"""
+        SELECT event_id, event_name, created_at, started_at, ended_at
+        FROM events_registry WHERE event_id IN ({placeholders})
+    """
+    with _get_db() as conn:
+        rows = conn.execute(query, event_ids).fetchall()
+    return {row["event_id"]: _event_registry_row(row) for row in rows}
+
+
+def _ensure_legacy_event(event_id: str, name: str, created_at: int) -> None:
+    if not event_id:
+        return
+    with _get_db() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO events (event_id, name, status, created_at, ended_at)
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (event_id, name, "active", created_at),
+        )
+        conn.commit()
+
+
+def _mark_legacy_event_ended(event_id: str, ended_at: int) -> None:
+    if not event_id:
+        return
+    with _get_db() as conn:
+        conn.execute(
+            "UPDATE events SET status = ?, ended_at = ? WHERE event_id = ?",
+            ("ended", ended_at, event_id),
+        )
+        conn.commit()
+
+
+def _create_event_registry_entry(
+    event_name: str, started_at: Optional[int]
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    cleaned = _clean_event_name(event_name)
+    if not cleaned:
+        return None, None
+    name_norm = _normalize_event_name(cleaned)
+    existing = _get_event_registry_by_norm(name_norm)
+    if existing:
+        return None, existing
+    created_at = _event_timestamp()
+    started_at = started_at or created_at
+    event_id = _generate_event_id()
+    try:
+        with _get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO events_registry
+                (event_id, event_name, event_name_norm, created_at, started_at, ended_at)
+                VALUES (?, ?, ?, ?, ?, NULL)
+                """,
+                (event_id, cleaned, name_norm, created_at, started_at),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError:
+        existing = _get_event_registry_by_norm(name_norm)
+        return None, existing
+
+    _ensure_legacy_event(event_id, cleaned, created_at)
+    return {
+        "event_id": event_id,
+        "event_name": cleaned,
+        "created_at": created_at,
+        "started_at": started_at,
+        "ended_at": None,
+    }, None
+
+
+def _end_event_registry(event_id: str, ended_at: int) -> bool:
+    if not event_id:
+        return False
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT event_id FROM events_registry WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE events_registry SET ended_at = ? WHERE event_id = ?",
+            (ended_at, event_id),
+        )
+        conn.commit()
+    return True
 
 # ============================================================================
 # Cloudflare Access JWT
@@ -319,12 +730,91 @@ def _map_tile_providers() -> Dict[str, Dict[str, Any]]:
 
 MAP_TILE_PROVIDERS_CONFIG = _map_tile_providers()
 
+
+def _tile_thresholds() -> Dict[str, float]:
+    return {
+        "mapbox": MAP_TILE_LIMIT_MAPBOX,
+        "esri": MAP_TILE_LIMIT_ESRI,
+        "guardrailPct": MAP_TILE_SWITCH_THRESHOLD,
+        "disablePct": MAP_TILE_DISABLE_THRESHOLD,
+    }
+
 def _escape_label(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _escape_regex(value: str) -> str:
     return re.escape(value)
+
+def _escape_tag_value(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    value = str(value)
+    value = value.replace("\\", "\\\\")
+    value = value.replace(",", "\\,")
+    value = value.replace("=", "\\=")
+    value = value.replace(" ", "\\ ")
+    return value
+
+
+def _escape_measurement(value: str) -> str:
+    if not value:
+        return "metric"
+    value = str(value)
+    value = value.replace("\\", "\\\\")
+    value = value.replace(",", "\\,")
+    value = value.replace(" ", "\\ ")
+    return value
+
+
+def _build_event_line(
+    event_id: str,
+    system_id: str,
+    node_id: Optional[str],
+    deployment_id: Optional[str],
+    location: Optional[str],
+    active: int,
+    ts_ns: int,
+) -> Optional[str]:
+    if not event_id or not system_id:
+        return None
+    tags = [
+        f"event_id={_escape_tag_value(event_id)}",
+        f"system_id={_escape_tag_value(system_id)}",
+        f"location={_escape_tag_value(location or '-')}",
+    ]
+    cleaned_node_id = _clean_label_value(node_id, PLACEHOLDER_NODE_IDS)
+    cleaned_deployment_id = _clean_label_value(deployment_id, PLACEHOLDER_DEPLOYMENT_IDS)
+    if cleaned_node_id:
+        tags.append(f"node_id={_escape_tag_value(cleaned_node_id)}")
+    if cleaned_deployment_id:
+        tags.append(f"deployment_id={_escape_tag_value(cleaned_deployment_id)}")
+    return (
+        f"{_escape_measurement('ovr_event')},"
+        + ",".join(tags)
+        + f" active={int(active)}i {ts_ns}"
+    )
+
+
+def _vm_write_lines(lines: List[str]) -> tuple[bool, str]:
+    if not lines:
+        return False, "no lines to write"
+    if not VM_WRITE_URL:
+        return False, "vm write url not configured"
+    url = VM_WRITE_URL.rstrip("/")
+    payload = "\n".join(lines)
+    try:
+        resp = requests.post(
+            url,
+            data=payload.encode("utf-8"),
+            headers={"Content-Type": "text/plain"},
+            timeout=VM_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        return False, f"vm write error: {exc}"
+    if resp.status_code >= 300:
+        return False, f"vm write failed: {resp.status_code}"
+    return True, ""
 
 _LABEL_UNESCAPE_RE = re.compile(r"\\([ ,=\\])")
 
@@ -746,6 +1236,86 @@ def _write_json(path: str, payload: Dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2)
 
 
+def _write_text(path: str, content: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def _sha256_bytes(data: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _report_event_root(event_id: str) -> str:
+    return os.path.join(REPORTS_PATH, _safe_report_slug(event_id))
+
+
+def _report_node_root(event_id: str, node_key: str) -> str:
+    return os.path.join(_report_event_root(event_id), _safe_report_slug(node_key))
+
+
+def _report_aggregate_root(event_id: str) -> str:
+    return os.path.join(_report_event_root(event_id), "aggregate")
+
+
+def _report_paths(event_id: str, node_key: str) -> Dict[str, str]:
+    base = _report_node_root(event_id, node_key)
+    return {
+        "json": os.path.join(base, "report.json"),
+        "html": os.path.join(base, "report.html"),
+        "meta": os.path.join(base, "meta.json"),
+    }
+
+
+def _aggregate_paths(event_id: str) -> Dict[str, str]:
+    base = _report_aggregate_root(event_id)
+    return {
+        "json": os.path.join(base, "aggregate.json"),
+        "html": os.path.join(base, "aggregate.html"),
+    }
+
+
+def _store_report_bundle(
+    event_id: str,
+    node_key: str,
+    report: Dict[str, Any],
+    report_html: Optional[str],
+    metadata: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    safe_event = _safe_report_slug(event_id)
+    safe_node = _safe_report_slug(node_key)
+    if not safe_event or not safe_node:
+        return None
+    paths = _report_paths(event_id, node_key)
+    report_bytes = json.dumps(report, indent=2).encode("utf-8")
+    json_hash = _sha256_bytes(report_bytes)
+    _write_text(paths["json"], report_bytes.decode("utf-8"))
+    html_hash = None
+    if report_html:
+        html_bytes = report_html.encode("utf-8")
+        html_hash = _sha256_bytes(html_bytes)
+        _write_text(paths["html"], report_html)
+
+    meta = {
+        "event_id": event_id,
+        "event_id_original": metadata.get("event_id_original") or metadata.get("temp_event_id"),
+        "node_id": metadata.get("node_id"),
+        "system_id": metadata.get("system_id"),
+        "deployment_id": metadata.get("deployment_id"),
+        "generated_at": metadata.get("generated_at"),
+        "content_type_json": "application/json",
+        "content_type_html": "text/html" if report_html else None,
+        "sha256_json": json_hash,
+        "sha256_html": html_hash,
+        "version": metadata.get("version", "v1"),
+        "node_key": node_key,
+    }
+    _write_json(paths["meta"], meta)
+    return meta
+
+
 def _read_json(path: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -923,26 +1493,53 @@ def _list_monthly_reports(month_key: str) -> List[Dict[str, Any]]:
 
 
 def _list_event_reports(event_id: str) -> List[Dict[str, Any]]:
-    safe_event = _safe_report_slug(event_id)
-    root = os.path.join(REPORTS_PATH, "event", safe_event)
-    if not os.path.isdir(root):
-        return []
-    reports: List[Dict[str, Any]] = []
-    for node_key in os.listdir(root):
-        node_root = os.path.join(root, node_key)
-        if not os.path.isdir(node_root):
-            continue
-        latest = None
-        for stamp in os.listdir(node_root):
-            meta = _read_json(os.path.join(node_root, stamp, "meta.json"))
+    reports_by_node: Dict[str, Dict[str, Any]] = {}
+
+    event_root = _report_event_root(event_id)
+    if os.path.isdir(event_root):
+        for node_key in os.listdir(event_root):
+            if node_key == "aggregate":
+                continue
+            node_root = os.path.join(event_root, node_key)
+            if not os.path.isdir(node_root):
+                continue
+            meta = _read_json(os.path.join(node_root, "meta.json"))
             if not meta:
                 continue
             meta["node_key"] = node_key
             meta["event_id"] = meta.get("event_id", event_id)
-            if not latest or meta.get("generated_at", 0) > latest.get("generated_at", 0):
-                latest = meta
-        if latest:
-            reports.append(latest)
+            meta["storage"] = "v2"
+            meta["report_dir"] = node_root
+            reports_by_node[node_key] = meta
+
+    safe_event = _safe_report_slug(event_id)
+    legacy_root = os.path.join(REPORTS_PATH, "event", safe_event)
+    if os.path.isdir(legacy_root):
+        for node_key in os.listdir(legacy_root):
+            node_root = os.path.join(legacy_root, node_key)
+            if not os.path.isdir(node_root):
+                continue
+            latest = None
+            latest_dir = None
+            for stamp in os.listdir(node_root):
+                report_dir = os.path.join(node_root, stamp)
+                meta = _read_json(os.path.join(report_dir, "meta.json"))
+                if not meta:
+                    continue
+                meta["node_key"] = node_key
+                meta["event_id"] = meta.get("event_id", event_id)
+                if not latest or meta.get("generated_at", 0) > latest.get("generated_at", 0):
+                    latest = meta
+                    latest_dir = report_dir
+            if not latest:
+                continue
+            latest["storage"] = "legacy"
+            latest["report_dir"] = latest_dir
+            existing = reports_by_node.get(node_key)
+            if not existing or latest.get("generated_at", 0) > existing.get("generated_at", 0):
+                reports_by_node[node_key] = latest
+
+    reports = list(reports_by_node.values())
     reports.sort(key=lambda item: item.get("generated_at", 0), reverse=True)
     return reports
 
@@ -956,34 +1553,363 @@ def _list_report_month_keys() -> List[str]:
 
 
 def _list_report_event_ids() -> List[Dict[str, Any]]:
-    root = os.path.join(REPORTS_PATH, "event")
-    if not os.path.isdir(root):
-        return []
-    events: List[Dict[str, Any]] = []
-    for event_slug in os.listdir(root):
-        event_root = os.path.join(root, event_slug)
-        if not os.path.isdir(event_root):
-            continue
-        latest_event: Optional[Dict[str, Any]] = None
-        for node_key in os.listdir(event_root):
-            node_root = os.path.join(event_root, node_key)
-            if not os.path.isdir(node_root):
+    events: Dict[str, Dict[str, Any]] = {}
+
+    if os.path.isdir(REPORTS_PATH):
+        for entry in os.listdir(REPORTS_PATH):
+            if entry in {"monthly", "event"}:
                 continue
-            for stamp in os.listdir(node_root):
-                meta = _read_json(os.path.join(node_root, stamp, "meta.json"))
+            event_root = os.path.join(REPORTS_PATH, entry)
+            if not os.path.isdir(event_root):
+                continue
+            latest_event: Optional[Dict[str, Any]] = None
+            node_count = 0
+            for node_key in os.listdir(event_root):
+                if node_key == "aggregate":
+                    continue
+                node_root = os.path.join(event_root, node_key)
+                if not os.path.isdir(node_root):
+                    continue
+                meta = _read_json(os.path.join(node_root, "meta.json"))
                 if not meta:
                     continue
+                node_count += 1
                 if not latest_event or meta.get("generated_at", 0) > latest_event.get("generated_at", 0):
                     latest_event = meta
-        if latest_event:
-            events.append(
-                {
-                    "event_id": latest_event.get("event_id", event_slug),
+            if latest_event:
+                event_id = latest_event.get("event_id") or entry
+                existing = events.get(event_id)
+                candidate = {
+                    "event_id": event_id,
                     "generated_at": latest_event.get("generated_at", 0),
+                    "node_count": node_count,
                 }
-            )
-    events.sort(key=lambda item: item.get("generated_at", 0), reverse=True)
+                if not existing or candidate["generated_at"] > existing.get("generated_at", 0):
+                    events[event_id] = candidate
+
+    legacy_root = os.path.join(REPORTS_PATH, "event")
+    if os.path.isdir(legacy_root):
+        for event_slug in os.listdir(legacy_root):
+            event_root = os.path.join(legacy_root, event_slug)
+            if not os.path.isdir(event_root):
+                continue
+            latest_event: Optional[Dict[str, Any]] = None
+            node_count = 0
+            for node_key in os.listdir(event_root):
+                node_root = os.path.join(event_root, node_key)
+                if not os.path.isdir(node_root):
+                    continue
+                for stamp in os.listdir(node_root):
+                    meta = _read_json(os.path.join(node_root, stamp, "meta.json"))
+                    if not meta:
+                        continue
+                    if not latest_event or meta.get("generated_at", 0) > latest_event.get("generated_at", 0):
+                        latest_event = meta
+                node_count += 1
+            if latest_event:
+                event_id = latest_event.get("event_id", event_slug)
+                existing = events.get(event_id)
+                candidate = {
+                    "event_id": event_id,
+                    "generated_at": latest_event.get("generated_at", 0),
+                    "node_count": node_count,
+                }
+                if not existing or candidate["generated_at"] > existing.get("generated_at", 0):
+                    events[event_id] = candidate
+
+    event_list = list(events.values())
+    event_list.sort(key=lambda item: item.get("generated_at", 0), reverse=True)
+    return event_list
+
+
+def _list_report_events() -> List[Dict[str, Any]]:
+    events_by_id: Dict[str, Dict[str, Any]] = {}
+    for event in _list_event_registry("all"):
+        events_by_id[event["event_id"]] = {
+            "event_id": event["event_id"],
+            "event_name": event["event_name"],
+            "name": event["event_name"],
+            "status": _event_registry_status(event),
+            "created_at": event["created_at"],
+            "started_at": event["started_at"],
+            "ended_at": event["ended_at"],
+            "has_reports": False,
+            "report_nodes": 0,
+            "latest_report_at": None,
+        }
+
+    for event in _list_events("all"):
+        if event["event_id"] in events_by_id:
+            continue
+        events_by_id[event["event_id"]] = {
+            **event,
+            "event_name": event.get("name"),
+            "has_reports": False,
+            "report_nodes": 0,
+            "latest_report_at": None,
+        }
+
+    for entry in _list_report_event_ids():
+        event_id = entry.get("event_id")
+        if not event_id:
+            continue
+        record = events_by_id.setdefault(
+            event_id,
+            {
+                "event_id": event_id,
+                "name": None,
+                "status": "unknown",
+                "created_at": None,
+                "ended_at": None,
+                "has_reports": False,
+                "report_nodes": 0,
+                "latest_report_at": None,
+            },
+        )
+        record["has_reports"] = True
+        record["report_nodes"] = entry.get("node_count", record.get("report_nodes", 0))
+        record["latest_report_at"] = entry.get("generated_at", record.get("latest_report_at"))
+
+    def _sort_key(item: Dict[str, Any]) -> int:
+        return int(item.get("latest_report_at") or item.get("created_at") or 0)
+
+    events = list(events_by_id.values())
+    temp_ids = _alias_temp_event_ids()
+    if temp_ids:
+        events = [event for event in events if event.get("event_id") not in temp_ids]
+    events.sort(key=_sort_key, reverse=True)
     return events
+
+
+def _resolve_report_paths(event_id: str, node_key: str) -> Optional[Dict[str, Any]]:
+    node_key = _safe_report_slug(node_key)
+    if not node_key:
+        return None
+    paths = _report_paths(event_id, node_key)
+    if os.path.exists(paths["json"]):
+        return {
+            "json": paths["json"],
+            "html": paths["html"],
+            "meta": paths["meta"],
+            "storage": "v2",
+        }
+
+    for meta in _list_event_reports(event_id):
+        if meta.get("node_key") != node_key:
+            continue
+        report_dir = meta.get("report_dir")
+        if not report_dir:
+            continue
+        return {
+            "json": os.path.join(report_dir, "data.json"),
+            "html": os.path.join(report_dir, "report.html"),
+            "meta": os.path.join(report_dir, "meta.json"),
+            "storage": meta.get("storage", "legacy"),
+        }
+    return None
+
+
+def _aggregate_node_payload(event_id: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    node_key = meta.get("node_key")
+    if not node_key:
+        return None
+    report_dir = meta.get("report_dir")
+    if meta.get("storage") == "legacy" and report_dir:
+        json_path = os.path.join(report_dir, "data.json")
+        html_path = os.path.join(report_dir, "report.html")
+    else:
+        paths = _report_paths(event_id, node_key)
+        json_path = paths["json"]
+        html_path = paths["html"]
+
+    report_json = _read_json(json_path) if os.path.exists(json_path) else None
+    html_exists = os.path.exists(html_path)
+    safe_event = quote(event_id, safe="")
+    safe_node = quote(node_key, safe="")
+    return {
+        "node_id": meta.get("node_id") or node_key,
+        "system_id": meta.get("system_id"),
+        "generated_at": meta.get("generated_at"),
+        "event_id_original": meta.get("event_id_original"),
+        "report_json": report_json,
+        "report_json_url": f"/api/reports/{safe_event}/{safe_node}/json",
+        "report_html_url": f"/api/reports/{safe_event}/{safe_node}/html" if html_exists else None,
+    }
+
+
+def _render_aggregate_html(event_id: str, event: Optional[Dict[str, Any]], nodes: List[Dict[str, Any]]) -> str:
+    title = event.get("name") if event else None
+    title = title or event_id
+    title_html = html_lib.escape(title)
+    event_id_html = html_lib.escape(event_id)
+
+    header = f"""
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Event report: {title_html}</title>
+    <style>
+      body {{
+        font-family: "Segoe UI", Arial, sans-serif;
+        margin: 0;
+        padding: 24px;
+        background: #f8fafc;
+        color: #0f172a;
+      }}
+      h1 {{
+        margin: 0 0 6px;
+        font-size: 26px;
+      }}
+      .meta {{
+        color: #64748b;
+        margin-bottom: 20px;
+      }}
+      .node-card {{
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+      }}
+      .node-card h2 {{
+        font-size: 18px;
+        margin: 0 0 8px;
+      }}
+      .node-card a {{
+        color: #2563eb;
+        font-weight: 600;
+        text-decoration: none;
+      }}
+      iframe {{
+        width: 100%;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        margin-top: 12px;
+        height: 500px;
+      }}
+    </style>
+  </head>
+  <body>
+    <h1>{title_html}</h1>
+    <div class="meta">Event ID: {event_id_html}</div>
+"""
+
+    body_parts = [header]
+    if not nodes:
+        body_parts.append("<p>No node reports uploaded yet.</p>")
+    else:
+        for node in nodes:
+            label = node.get("node_id") or node.get("system_id") or "Unknown node"
+            label_html = html_lib.escape(str(label))
+            generated = node.get("generated_at")
+            ts_label = f"{generated}" if generated else "unknown time"
+            link = node.get("report_html_url") or node.get("report_json_url") or "#"
+            link_html = html_lib.escape(link)
+            body_parts.append(
+                f"""
+    <div class="node-card">
+      <h2>{label_html}</h2>
+      <div class="meta">Generated at: {ts_label}</div>
+      <a href="{link_html}" target="_blank" rel="noreferrer">Open node report</a>
+"""
+            )
+            if node.get("report_html_url"):
+                iframe_src = html_lib.escape(node["report_html_url"])
+                body_parts.append(f'      <iframe src="{iframe_src}" loading="lazy"></iframe>\n')
+            body_parts.append("    </div>")
+
+    body_parts.append("</body></html>")
+    return "\n".join(body_parts)
+
+
+def _write_aggregate_report(event_id: str) -> Optional[Dict[str, Any]]:
+    reports = _list_event_reports(event_id)
+    if not reports:
+        return None
+    event = _get_event(event_id)
+    nodes: List[Dict[str, Any]] = []
+    for meta in reports:
+        payload = _aggregate_node_payload(event_id, meta)
+        if payload:
+            nodes.append(payload)
+
+    payload = {
+        "event_id": event_id,
+        "name": event.get("name") if event else None,
+        "status": event.get("status") if event else None,
+        "created_at": event.get("created_at") if event else None,
+        "ended_at": event.get("ended_at") if event else None,
+        "generated_at": int(time.time() * 1e9),
+        "nodes": nodes,
+    }
+    paths = _aggregate_paths(event_id)
+    _write_json(paths["json"], payload)
+    _write_text(paths["html"], _render_aggregate_html(event_id, event, nodes))
+    return payload
+
+
+def _merge_temp_reports(event_id: str, node_id: str, temp_event_id: str) -> Dict[str, Any]:
+    merged = 0
+    updated_nodes: List[str] = []
+    temp_reports = _list_event_reports(temp_event_id)
+    if not temp_reports:
+        return {"merged": 0, "nodes": []}
+
+    safe_node = _safe_report_slug(node_id) if node_id else ""
+    for meta in temp_reports:
+        meta_node_id = meta.get("node_id")
+        node_key = meta.get("node_key") or ""
+        if node_id:
+            node_match = False
+            if meta_node_id and meta_node_id == node_id:
+                node_match = True
+            if safe_node and node_key == safe_node:
+                node_match = True
+            if not node_match:
+                continue
+
+        report_dir = meta.get("report_dir")
+        if meta.get("storage") == "legacy" and report_dir:
+            json_path = os.path.join(report_dir, "data.json")
+            html_path = os.path.join(report_dir, "report.html")
+        else:
+            paths = _report_paths(temp_event_id, node_key)
+            json_path = paths["json"]
+            html_path = paths["html"]
+
+        report = _read_json(json_path)
+        if not report:
+            continue
+        report_html = None
+        if os.path.exists(html_path):
+            try:
+                with open(html_path, "r", encoding="utf-8") as handle:
+                    report_html = handle.read()
+            except Exception:
+                report_html = None
+
+        report = dict(report)
+        report["event_id_original"] = report.get("event_id", temp_event_id)
+        report["event_id"] = event_id
+
+        meta_payload = {
+            "node_id": meta.get("node_id"),
+            "system_id": meta.get("system_id"),
+            "deployment_id": meta.get("deployment_id"),
+            "generated_at": meta.get("generated_at"),
+            "event_id_original": temp_event_id,
+        }
+        stored = _store_report_bundle(event_id, node_key, report, report_html, meta_payload)
+        if not stored:
+            continue
+        merged += 1
+        updated_nodes.append(node_key)
+
+    if merged:
+        _write_aggregate_report(event_id)
+    return {"merged": merged, "nodes": updated_nodes}
 
 
 def _parse_deployment_filter() -> List[str]:
@@ -1078,12 +2004,14 @@ def _map_tiles_total(provider: str, deployment_ids: Optional[List[str]]) -> tupl
             continue
         vm_ok = True
         if not result:
-            return 0, True
+            continue
         value = _value_to_float(result[0].get("value"))
         if value is None:
             continue
         return int(value), True
-    return None, vm_ok
+    if vm_ok:
+        return 0, True
+    return None, False
 
 
 def _load_manual_locations() -> Dict[str, Dict[str, Any]]:
@@ -1419,6 +2347,19 @@ def _load_nodes(
     _apply_acuvim_series(nodes, acuvim_p_series, "acuvim_p")
     _apply_events(nodes, event_series)
 
+    alias_map = _load_event_alias_map()
+    if alias_map:
+        for node in nodes.values():
+            event_id = node.get("event_id")
+            node_id = _clean_label_value(node.get("node_id"), PLACEHOLDER_NODE_IDS)
+            if not event_id or not node_id:
+                continue
+            alias_key = (event_id, node_id)
+            resolved = alias_map.get(alias_key)
+            if resolved and resolved != event_id:
+                node["event_id_original"] = event_id
+                node["event_id"] = resolved
+
     lat_by_node = _build_gps_by_node_id(lat_series)
     lon_by_node = _build_gps_by_node_id(lon_series)
     for node in nodes.values():
@@ -1491,6 +2432,21 @@ def _load_nodes(
     return _finalize_nodes(nodes, manual_locations)
 
 
+def _nodes_by_node_id(nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    for node in nodes:
+        node_id = _clean_label_value(node.get("node_id"), PLACEHOLDER_NODE_IDS)
+        if not node_id:
+            continue
+        current = result.get(node_id)
+        if not current:
+            result[node_id] = node
+            continue
+        if current.get("is_logger") and not node.get("is_logger"):
+            result[node_id] = node
+    return result
+
+
 def _load_active_events(deployment_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     selector = _build_selector(deployment_ids=deployment_ids)
     lookback = f"{LOOKBACK_SECONDS}s"
@@ -1540,49 +2496,39 @@ def _load_active_events(deployment_ids: Optional[List[str]] = None) -> List[Dict
 def api_fleet_map_tiles_status() -> Any:
     deployment_ids = _parse_deployment_filter()
     month_key = utc_month_key()
-    thresholds = {
-        "mapbox": MAPBOX_FREE_TILES_PER_MONTH,
-        "esri": ESRI_FREE_TILES_PER_MONTH,
-        "guardrailPct": GUARDRAIL_LIMIT_PCT,
-    }
-
-    fleet_counts: Dict[str, Optional[int]] = {}
-    vm_ok = True
-    for provider in MAP_TILE_PROVIDERS:
-        total, ok = _map_tiles_total(provider, deployment_ids if deployment_ids else None)
-        if not ok:
-            vm_ok = False
-        fleet_counts[provider] = total if ok else None
-
+    thresholds = _tile_thresholds()
     deployment_id = _preference_deployment_id(deployment_ids if deployment_ids else None)
     with _get_db() as conn:
         preferred_provider = get_preferred_provider(conn, deployment_id)
+        fleet_counts = get_tile_usage_totals(
+            conn,
+            month_key,
+            deployment_ids if deployment_ids else None,
+        )
 
     if not preferred_provider or preferred_provider not in MAP_TILE_PROVIDERS:
         preferred_provider = MAP_DEFAULT_PROVIDER if MAP_DEFAULT_PROVIDER in MAP_TILE_PROVIDERS else "esri"
 
-    guardrail = build_guardrail_status(
+    policy = build_tile_policy(
         preferred_provider,
         fleet_counts,
-        {"mapbox": MAPBOX_FREE_TILES_PER_MONTH, "esri": ESRI_FREE_TILES_PER_MONTH},
-        GUARDRAIL_LIMIT_PCT,
+        {"mapbox": MAP_TILE_LIMIT_MAPBOX, "esri": MAP_TILE_LIMIT_ESRI},
+        MAP_TILE_SWITCH_THRESHOLD,
+        MAP_TILE_DISABLE_THRESHOLD,
         _month_label(month_key),
     )
-
-    warning = guardrail["warning"]
-    if not vm_ok:
-        warning = warning or "Fleet totals unavailable."
 
     resp = jsonify({
         "month_key": month_key,
         "thresholds": thresholds,
         "local": None,
         "fleet": fleet_counts,
-        "pct": guardrail["pct"],
-        "blocked": guardrail["blocked"],
+        "pct": policy["pct"],
+        "blocked": policy["blocked"],
         "preferredProvider": preferred_provider,
-        "recommendedProvider": guardrail["recommended_provider"],
-        "warning": warning,
+        "recommendedProvider": policy["recommended_provider"],
+        "satelliteAllowed": policy["satellite_allowed"],
+        "warning": policy["warning"],
         "providers": MAP_TILE_PROVIDERS_CONFIG,
     })
     resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -1613,30 +2559,26 @@ def api_fleet_map_provider_set() -> Any:
     deployment_id = str(payload.get("deployment_id", "")).strip() or DEPLOYMENT_ID
     deployment_ids = [deployment_id] if deployment_id else None
 
-    fleet_counts: Dict[str, Optional[int]] = {}
-    vm_ok = True
-    for name in MAP_TILE_PROVIDERS:
-        total, ok = _map_tiles_total(name, deployment_ids)
-        if not ok:
-            vm_ok = False
-        fleet_counts[name] = total if ok else None
+    with _get_db() as conn:
+        fleet_counts = get_tile_usage_totals(conn, utc_month_key(), deployment_ids)
 
     preferred_provider = provider
-    guardrail = build_guardrail_status(
+    policy = build_tile_policy(
         preferred_provider,
         fleet_counts,
-        {"mapbox": MAPBOX_FREE_TILES_PER_MONTH, "esri": ESRI_FREE_TILES_PER_MONTH},
-        GUARDRAIL_LIMIT_PCT,
+        {"mapbox": MAP_TILE_LIMIT_MAPBOX, "esri": MAP_TILE_LIMIT_ESRI},
+        MAP_TILE_SWITCH_THRESHOLD,
+        MAP_TILE_DISABLE_THRESHOLD,
     )
 
-    if guardrail["blocked"].get(provider):
+    if policy["blocked"].get(provider):
         return (
             jsonify(
                 {
                     "error": "provider blocked by guardrail",
                     "preferredProvider": preferred_provider,
-                    "recommendedProvider": guardrail["recommended_provider"],
-                    "warning": guardrail["warning"],
+                    "recommendedProvider": policy["recommended_provider"],
+                    "warning": policy["warning"],
                     "fleet": fleet_counts,
                 }
             ),
@@ -1650,11 +2592,140 @@ def api_fleet_map_provider_set() -> Any:
     response = {
         "ok": True,
         "provider": provider,
-        "warning": guardrail["warning"],
+        "warning": policy["warning"],
     }
-    if not vm_ok:
-        response["warning"] = response["warning"] or "Fleet totals unavailable."
     return jsonify(response)
+
+
+@app.route("/api/tiles/usage", methods=["POST"])
+def api_tiles_usage() -> Any:
+    payload = request.get_json(silent=True) or {}
+    provider = str(payload.get("provider", "")).strip().lower()
+    if not is_valid_provider(provider):
+        return jsonify({"error": "provider must be mapbox or esri"}), 400
+
+    node_id = str(payload.get("node_id", "")).strip()
+    if not node_id:
+        return jsonify({"error": "node_id required"}), 400
+
+    delta_value = payload.get("delta", payload.get("count", payload.get("increment_count", 0)))
+    try:
+        delta = int(delta_value)
+    except Exception:
+        return jsonify({"error": "delta must be an integer"}), 400
+    if delta <= 0:
+        return jsonify({"error": "delta must be positive"}), 400
+
+    month_key = _parse_month_key(str(payload.get("month", payload.get("month_key", ""))).strip())
+    if not month_key:
+        month_key = utc_month_key()
+
+    deployment_id = str(payload.get("deployment_id", "")).strip() or DEPLOYMENT_ID or "global"
+
+    with _get_db() as conn:
+        record_tile_usage(conn, month_key, provider, node_id, deployment_id, delta)
+        conn.commit()
+
+    return jsonify(
+        {
+            "ok": True,
+            "provider": provider,
+            "delta": delta,
+            "month_key": month_key,
+            "node_id": node_id,
+            "deployment_id": deployment_id,
+        }
+    )
+
+
+@app.route("/api/tiles/state", methods=["GET"])
+def api_tiles_state() -> Any:
+    month_key = _parse_month_key(request.args.get("month", "").strip())
+    if not month_key:
+        month_key = utc_month_key()
+    deployment_ids = _parse_deployment_filter()
+    thresholds = _tile_thresholds()
+    deployment_id = _preference_deployment_id(deployment_ids if deployment_ids else None)
+
+    with _get_db() as conn:
+        preferred_provider = get_preferred_provider(conn, deployment_id)
+        fleet_counts = get_tile_usage_totals(
+            conn,
+            month_key,
+            deployment_ids if deployment_ids else None,
+        )
+
+    if not preferred_provider or preferred_provider not in MAP_TILE_PROVIDERS:
+        preferred_provider = MAP_DEFAULT_PROVIDER if MAP_DEFAULT_PROVIDER in MAP_TILE_PROVIDERS else "esri"
+
+    policy = build_tile_policy(
+        preferred_provider,
+        fleet_counts,
+        {"mapbox": MAP_TILE_LIMIT_MAPBOX, "esri": MAP_TILE_LIMIT_ESRI},
+        MAP_TILE_SWITCH_THRESHOLD,
+        MAP_TILE_DISABLE_THRESHOLD,
+        _month_label(month_key),
+    )
+
+    resp = jsonify(
+        {
+            "month_key": month_key,
+            "thresholds": thresholds,
+            "fleet": fleet_counts,
+            "pct": policy["pct"],
+            "blocked": policy["blocked"],
+            "preferredProvider": preferred_provider,
+            "recommendedProvider": policy["recommended_provider"],
+            "satelliteAllowed": policy["satellite_allowed"],
+            "warning": policy["warning"],
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/tiles/policy", methods=["GET"])
+def api_tiles_policy() -> Any:
+    month_key = _parse_month_key(request.args.get("month", "").strip())
+    if not month_key:
+        month_key = utc_month_key()
+    deployment_ids = _parse_deployment_filter()
+    deployment_id = _preference_deployment_id(deployment_ids if deployment_ids else None)
+
+    with _get_db() as conn:
+        preferred_provider = get_preferred_provider(conn, deployment_id)
+        fleet_counts = get_tile_usage_totals(
+            conn,
+            month_key,
+            deployment_ids if deployment_ids else None,
+        )
+
+    if not preferred_provider or preferred_provider not in MAP_TILE_PROVIDERS:
+        preferred_provider = MAP_DEFAULT_PROVIDER if MAP_DEFAULT_PROVIDER in MAP_TILE_PROVIDERS else "esri"
+
+    policy = build_tile_policy(
+        preferred_provider,
+        fleet_counts,
+        {"mapbox": MAP_TILE_LIMIT_MAPBOX, "esri": MAP_TILE_LIMIT_ESRI},
+        MAP_TILE_SWITCH_THRESHOLD,
+        MAP_TILE_DISABLE_THRESHOLD,
+        _month_label(month_key),
+    )
+
+    resp = jsonify(
+        {
+            "month_key": month_key,
+            "preferredProvider": preferred_provider,
+            "recommendedProvider": policy["recommended_provider"],
+            "satelliteAllowed": policy["satellite_allowed"],
+            "blocked": policy["blocked"],
+            "pct": policy["pct"],
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/api/health", methods=["GET"])
@@ -1694,26 +2765,290 @@ def api_nodes() -> Any:
     return resp
 
 
-@app.route("/api/events", methods=["GET"])
+@app.route("/api/events", methods=["GET", "POST"])
 def api_events() -> Any:
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        raw_name = payload.get("event_name") or payload.get("name")
+        name = _clean_event_name(raw_name)
+        if not name:
+            return jsonify({"error": "event_name required"}), 400
+        started_at_raw = payload.get("started_at")
+        started_at = None
+        if started_at_raw is not None:
+            started_at = _parse_event_timestamp(started_at_raw)
+            if started_at is None:
+                return jsonify({"error": "started_at invalid"}), 400
+        event, existing = _create_event_registry_entry(name, started_at)
+        if existing:
+            year = datetime.now().year
+            suggested = f"{name} {year}"
+            return jsonify(
+                {
+                    "error": "event_name_exists",
+                    "existing": {
+                        "event_id": existing["event_id"],
+                        "event_name": existing["event_name"],
+                        "created_at": existing["created_at"],
+                        "started_at": existing.get("started_at"),
+                    },
+                    "suggested": {"event_name": suggested},
+                }
+            ), 409
+        if not event:
+            return jsonify({"error": "event_name required"}), 400
+        response = {
+            "event_id": event["event_id"],
+            "event_name": event["event_name"],
+            "name": event["event_name"],
+            "created_at": event["created_at"],
+            "started_at": event["started_at"],
+            "ended_at": event["ended_at"],
+            "status": "active",
+        }
+        return jsonify(response), 201
+
     deployment_ids = _parse_deployment_filter()
     events = _load_active_events(deployment_ids if deployment_ids else None)
+    registry = _event_registry_lookup([event["event_id"] for event in events if event.get("event_id")])
+    for event in events:
+        event_id = event.get("event_id")
+        info = registry.get(event_id) if event_id else None
+        if info:
+            event["event_name"] = info["event_name"]
+            event["name"] = info["event_name"]
+            event["created_at"] = info["created_at"]
+            event["started_at"] = info["started_at"]
+            event["ended_at"] = info["ended_at"]
+        else:
+            event["event_name"] = event_id
+            event["name"] = event_id
+        event["status"] = "active"
     resp = jsonify({"events": events})
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
 
 
+@app.route("/api/events/create", methods=["POST"])
+def api_events_create() -> Any:
+    return api_events()
+
+
+@app.route("/api/events/registry", methods=["GET"])
+def api_events_registry() -> Any:
+    status = str(request.args.get("status", "all")).strip().lower()
+    event_id = str(request.args.get("event_id", "")).strip()
+    if status not in {"active", "ended", "all"}:
+        status = "all"
+    events = _list_event_registry(status=status, event_id=event_id or None)
+    payload = []
+    for event in events:
+        payload.append(
+            {
+                "event_id": event["event_id"],
+                "event_name": event["event_name"],
+                "created_at": event["created_at"],
+                "started_at": event["started_at"],
+                "ended_at": event["ended_at"],
+                "status": _event_registry_status(event),
+            }
+        )
+    resp = jsonify({"events": payload})
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/events/<event_id>", methods=["GET"])
+def api_event_detail(event_id: str) -> Any:
+    event = _get_event(event_id)
+    if not event:
+        return jsonify({"error": "event not found"}), 404
+    resp = jsonify(event)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/events/<event_id>/end", methods=["POST"])
+def api_event_end(event_id: str) -> Any:
+    event = _get_event_registry(event_id)
+    if not event:
+        legacy_event = _end_event(event_id)
+        if legacy_event:
+            return jsonify(legacy_event)
+        return jsonify({"error": "event not found"}), 404
+    ended_at = _event_timestamp()
+    nodes = _load_nodes(event_ids=[event_id])
+    ts_ns = int(ended_at * 1_000_000_000)
+    lines: List[str] = []
+    seen: set[tuple[str, Optional[str], Optional[str]]] = set()
+    for node in nodes:
+        system_id = node.get("host_system_id") or node.get("system_id")
+        node_id = _clean_label_value(node.get("node_id"), PLACEHOLDER_NODE_IDS)
+        deployment_id = _clean_label_value(node.get("deployment_id"), PLACEHOLDER_DEPLOYMENT_IDS)
+        if not system_id:
+            continue
+        key = (system_id, node_id, deployment_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        line = _build_event_line(
+            event_id,
+            system_id,
+            node_id,
+            deployment_id,
+            node.get("location"),
+            0,
+            ts_ns,
+        )
+        if line:
+            lines.append(line)
+    if lines:
+        ok, error = _vm_write_lines(lines)
+        if not ok:
+            return jsonify({"error": "vm_write_failed", "detail": error}), 502
+    _end_event_registry(event_id, ended_at)
+    _mark_legacy_event_ended(event_id, ended_at)
+    event["ended_at"] = ended_at
+    payload = {
+        "event_id": event["event_id"],
+        "event_name": event["event_name"],
+        "name": event["event_name"],
+        "created_at": event["created_at"],
+        "started_at": event["started_at"],
+        "ended_at": event["ended_at"],
+        "status": "ended",
+    }
+    return jsonify(payload)
+
+
+@app.route("/api/events/<event_id>/add_nodes", methods=["POST"])
+def api_event_add_nodes_bulk(event_id: str) -> Any:
+    payload = request.get_json(silent=True) or {}
+    node_ids = payload.get("node_ids") or []
+    if isinstance(node_ids, str):
+        node_ids = [node_ids]
+    if not isinstance(node_ids, list):
+        return jsonify({"error": "node_ids must be a list"}), 400
+    node_ids = [str(value).strip() for value in node_ids if str(value).strip()]
+    if not node_ids:
+        return jsonify({"error": "node_ids required"}), 400
+
+    event = _get_event_registry(event_id)
+    if not event:
+        return jsonify({"error": "event not found"}), 404
+
+    nodes = _load_nodes()
+    nodes_by_id = _nodes_by_node_id(nodes)
+    started_at = event.get("started_at") or _event_timestamp()
+    ts_ns = int(started_at * 1_000_000_000)
+    location = _clean_event_name(payload.get("location"))
+
+    lines: List[str] = []
+    added: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for node_id in node_ids:
+        resolved = nodes_by_id.get(node_id)
+        if not resolved:
+            missing.append(node_id)
+            continue
+        system_id = resolved.get("host_system_id") or resolved.get("system_id")
+        deployment_id = resolved.get("deployment_id")
+        line = _build_event_line(
+            event_id,
+            system_id,
+            node_id,
+            deployment_id,
+            location or resolved.get("location"),
+            1,
+            ts_ns,
+        )
+        if not line:
+            missing.append(node_id)
+            continue
+        lines.append(line)
+        added.append(
+            {
+                "node_id": node_id,
+                "system_id": system_id,
+                "deployment_id": _clean_label_value(
+                    deployment_id, PLACEHOLDER_DEPLOYMENT_IDS
+                ),
+            }
+        )
+
+    if not lines:
+        return jsonify({"error": "no_nodes_found", "missing": missing}), 404
+
+    ok, error = _vm_write_lines(lines)
+    if not ok:
+        return jsonify({"error": "vm_write_failed", "detail": error}), 502
+
+    for entry in added:
+        _add_event_node(event_id, entry["node_id"])
+
+    return jsonify(
+        {
+            "event_id": event_id,
+            "added": added,
+            "missing": missing,
+            "started_at": started_at,
+        }
+    )
+
+
+@app.route("/api/events/<event_id>/nodes", methods=["POST"])
+def api_event_add_node(event_id: str) -> Any:
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id", "")).strip()
+    if not node_id:
+        return jsonify({"error": "node_id required"}), 400
+    event = _get_event(event_id)
+    if not event:
+        return jsonify({"error": "event not found"}), 404
+    created = _add_event_node(event_id, node_id)
+    return jsonify({"event_id": event_id, "node_id": node_id, "created": created})
+
+
+@app.route("/api/events/<event_id>/nodes/<node_id>/end", methods=["POST"])
+def api_event_end_node(event_id: str, node_id: str) -> Any:
+    event = _get_event(event_id)
+    if not event:
+        return jsonify({"error": "event not found"}), 404
+    updated = _end_event_node(event_id, node_id)
+    if not updated:
+        return jsonify({"error": "node not found"}), 404
+    return jsonify({"event_id": event_id, "node_id": node_id, "ended": True})
+
+
+@app.route("/api/events/<event_id>/aliases", methods=["POST"])
+def api_event_aliases(event_id: str) -> Any:
+    payload = request.get_json(silent=True) or {}
+    node_id = str(payload.get("node_id", "")).strip()
+    temp_event_id = str(payload.get("temp_event_id", "")).strip()
+    if not node_id or not temp_event_id:
+        return jsonify({"error": "node_id and temp_event_id required"}), 400
+    event = _get_event(event_id)
+    if not event:
+        return jsonify({"error": "event not found"}), 404
+    _add_event_alias(event_id, node_id, temp_event_id)
+    merged = _merge_temp_reports(event_id, node_id, temp_event_id)
+    return jsonify(
+        {
+            "event_id": event_id,
+            "node_id": node_id,
+            "temp_event_id": temp_event_id,
+            "merged_reports": merged.get("merged", 0),
+        }
+    )
+
+
 @app.route("/api/reports", methods=["GET"])
 def api_reports_summary() -> Any:
     months = _list_report_month_keys()
-    current_month = datetime.now(REPORTS_TIMEZONE).strftime("%Y-%m")
-    if current_month not in months:
-        start_ts, end_ts = _month_bounds(current_month)
-        selector = _build_selector()
-        if _find_system_ids_with_data(start_ts, end_ts, selector):
-            months = [current_month] + months
-    events = _list_report_event_ids()
+    events = _list_report_events()
     resp = jsonify({"months": months, "events": events})
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -1725,8 +3060,6 @@ def api_reports_monthly() -> Any:
     month_key = _parse_month_key(request.args.get("month", ""))
     if not month_key:
         return jsonify({"error": "month required (YYYY-MM)"}), 400
-    deployment_ids = _parse_deployment_filter()
-    _generate_monthly_reports(month_key, deployment_ids if deployment_ids else None)
     reports = _list_monthly_reports(month_key)
     base_url = _report_base_url()
     for report in reports:
@@ -1735,7 +3068,14 @@ def api_reports_monthly() -> Any:
             continue
         report["report_url"] = f"{base_url}/api/reports/monthly/{month_key}/{node_key}"
         report["download_url"] = f"{base_url}/api/reports/monthly/{month_key}/{node_key}?download=1"
-    resp = jsonify({"month": month_key, "reports": reports})
+    payload: Dict[str, Any] = {"month": month_key, "reports": reports}
+    if not reports:
+        payload["warning"] = (
+            "No monthly reports found. Check FLEET_METRIC_SUFFIX and stream aggregation."
+        )
+        payload["metric_suffix"] = METRIC_SUFFIX
+        payload["metric_names"] = [_metric_name(name) for name in _MONTHLY_METRICS.values()]
+    resp = jsonify(payload)
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
@@ -1759,6 +3099,54 @@ def api_reports_event() -> Any:
             f"{base_url}/api/reports/event/{safe_event}/{node_key}/html"
         )
     resp = jsonify({"event_id": event_id, "reports": reports})
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/reports/events", methods=["GET"])
+def api_reports_events() -> Any:
+    events = _list_report_events()
+    resp = jsonify({"events": events})
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/reports/<event_id>", methods=["GET"])
+def api_reports_event_nodes(event_id: str) -> Any:
+    event_id = event_id.strip()
+    if not event_id:
+        return jsonify({"error": "event_id required"}), 400
+    reports = _list_event_reports(event_id)
+    base_url = _report_base_url()
+    safe_event = quote(event_id, safe="")
+    items = []
+    for report in reports:
+        node_key = report.get("node_key")
+        if not node_key:
+            continue
+        items.append(
+            {
+                "node_key": node_key,
+                "node_id": report.get("node_id"),
+                "system_id": report.get("system_id"),
+                "generated_at": report.get("generated_at"),
+                "report_json_url": f"{base_url}/api/reports/{safe_event}/{node_key}/json",
+                "report_html_url": f"{base_url}/api/reports/{safe_event}/{node_key}/html",
+                "event_id_original": report.get("event_id_original"),
+            }
+        )
+
+    aggregate_paths = _aggregate_paths(event_id)
+    if reports and not (os.path.exists(aggregate_paths["json"]) or os.path.exists(aggregate_paths["html"])):
+        _write_aggregate_report(event_id)
+    aggregate = {
+        "available": os.path.exists(aggregate_paths["json"]) or os.path.exists(aggregate_paths["html"]),
+        "report_json_url": f"{base_url}/api/reports/{safe_event}/aggregate/json",
+        "report_html_url": f"{base_url}/api/reports/{safe_event}/aggregate/html",
+    }
+    resp = jsonify({"event_id": event_id, "reports": items, "aggregate": aggregate})
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
@@ -1793,27 +3181,14 @@ def api_reports_event_get(event_id: str, node_key: str) -> Any:
     safe_node = _safe_report_slug(node_key)
     if safe_node != node_key or not safe_event:
         return jsonify({"error": "invalid request"}), 400
-    report_root = os.path.join(REPORTS_PATH, "event", safe_event, safe_node)
-    if not os.path.isdir(report_root):
-        return jsonify({"error": "report not found"}), 404
-    latest_dir = None
-    for stamp in os.listdir(report_root):
-        candidate = os.path.join(report_root, stamp)
-        if not os.path.isdir(candidate):
-            continue
-        if not latest_dir or stamp > latest_dir[0]:
-            latest_dir = (stamp, candidate)
-    if not latest_dir:
-        return jsonify({"error": "report not found"}), 404
-    report_dir = latest_dir[1]
-    report_path = os.path.join(report_dir, "data.json")
-    if not os.path.exists(report_path):
+    resolved = _resolve_report_paths(event_id, node_key)
+    if not resolved or not os.path.exists(resolved["json"]):
         return jsonify({"error": "report not found"}), 404
     download = request.args.get("download") == "1"
     filename = f"event_{safe_event}_{safe_node}.json"
     return send_from_directory(
-        report_dir,
-        "data.json",
+        os.path.dirname(resolved["json"]),
+        os.path.basename(resolved["json"]),
         as_attachment=download,
         download_name=filename,
         mimetype="application/json",
@@ -1826,27 +3201,19 @@ def api_reports_event_html(event_id: str, node_key: str) -> Any:
     safe_node = _safe_report_slug(node_key)
     if safe_node != node_key or not safe_event:
         return jsonify({"error": "invalid request"}), 400
-    report_root = os.path.join(REPORTS_PATH, "event", safe_event, safe_node)
-    if not os.path.isdir(report_root):
+    resolved = _resolve_report_paths(event_id, node_key)
+    if not resolved:
         return "Report not found", 404
-    latest_dir = None
-    for stamp in os.listdir(report_root):
-        candidate = os.path.join(report_root, stamp)
-        if not os.path.isdir(candidate):
-            continue
-        if not latest_dir or stamp > latest_dir[0]:
-            latest_dir = (stamp, candidate)
-    if not latest_dir:
-        return "Report not found", 404
-    report_dir = latest_dir[1]
-    html_path = os.path.join(report_dir, "report.html")
-    if os.path.exists(html_path):
-        return send_from_directory(report_dir, "report.html", mimetype="text/html")
-    report_path = os.path.join(report_dir, "data.json")
-    if not os.path.exists(report_path):
+    if os.path.exists(resolved["html"]):
+        return send_from_directory(
+            os.path.dirname(resolved["html"]),
+            os.path.basename(resolved["html"]),
+            mimetype="text/html",
+        )
+    if not os.path.exists(resolved["json"]):
         return "Report not found", 404
     try:
-        with open(report_path, "r") as handle:
+        with open(resolved["json"], "r") as handle:
             payload = json.load(handle)
         pretty = json.dumps(payload, indent=2)
     except Exception:
@@ -1869,6 +3236,74 @@ def api_reports_event_html(event_id: str, node_key: str) -> Any:
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
+@app.route("/api/reports/<event_id>/<node_key>/json", methods=["GET"])
+def api_reports_node_json(event_id: str, node_key: str) -> Any:
+    resolved = _resolve_report_paths(event_id, node_key)
+    if not resolved or not os.path.exists(resolved["json"]):
+        return jsonify({"error": "report not found"}), 404
+    safe_event = _safe_report_slug(event_id)
+    safe_node = _safe_report_slug(node_key)
+    download = request.args.get("download") == "1"
+    filename = f"event_{safe_event}_{safe_node}.json"
+    return send_from_directory(
+        os.path.dirname(resolved["json"]),
+        os.path.basename(resolved["json"]),
+        as_attachment=download,
+        download_name=filename,
+        mimetype="application/json",
+    )
+
+
+@app.route("/api/reports/<event_id>/<node_key>/html", methods=["GET"])
+def api_reports_node_html(event_id: str, node_key: str) -> Any:
+    resolved = _resolve_report_paths(event_id, node_key)
+    if not resolved:
+        return "Report not found", 404
+    if os.path.exists(resolved["html"]):
+        return send_from_directory(
+            os.path.dirname(resolved["html"]),
+            os.path.basename(resolved["html"]),
+            mimetype="text/html",
+        )
+    return "Report not found", 404
+
+
+@app.route("/api/reports/<event_id>/aggregate/json", methods=["GET"])
+def api_reports_aggregate_json(event_id: str) -> Any:
+    event_id = event_id.strip()
+    if not event_id:
+        return jsonify({"error": "event_id required"}), 400
+    paths = _aggregate_paths(event_id)
+    if not os.path.exists(paths["json"]):
+        if not _write_aggregate_report(event_id):
+            return jsonify({"error": "aggregate not found"}), 404
+    safe_event = _safe_report_slug(event_id)
+    filename = f"event_{safe_event}_aggregate.json"
+    return send_from_directory(
+        os.path.dirname(paths["json"]),
+        os.path.basename(paths["json"]),
+        as_attachment=request.args.get("download") == "1",
+        download_name=filename,
+        mimetype="application/json",
+    )
+
+
+@app.route("/api/reports/<event_id>/aggregate/html", methods=["GET"])
+def api_reports_aggregate_html(event_id: str) -> Any:
+    event_id = event_id.strip()
+    if not event_id:
+        return "Report not found", 404
+    paths = _aggregate_paths(event_id)
+    if not os.path.exists(paths["html"]):
+        if not _write_aggregate_report(event_id):
+            return "Report not found", 404
+    return send_from_directory(
+        os.path.dirname(paths["html"]),
+        os.path.basename(paths["html"]),
+        mimetype="text/html",
+    )
+
+
 @app.route("/api/reports/upload", methods=["POST"])
 def api_reports_upload() -> Any:
     if REPORTS_UPLOAD_TOKEN:
@@ -1881,8 +3316,16 @@ def api_reports_upload() -> Any:
         return jsonify({"error": "unsupported report type"}), 400
 
     report = payload.get("report") or {}
+    if not isinstance(report, dict):
+        return jsonify({"error": "report must be an object"}), 400
     report_html = payload.get("report_html")
     event_id = (payload.get("event_id") or report.get("event_id") or "").strip()
+    temp_event_id = (payload.get("temp_event_id") or report.get("temp_event_id") or "").strip()
+    event_id_original = (
+        payload.get("event_id_original")
+        or report.get("event_id_original")
+        or temp_event_id
+    )
     if not event_id:
         return jsonify({"error": "event_id required"}), 400
     node_id = payload.get("node_id") or report.get("node_id")
@@ -1890,48 +3333,52 @@ def api_reports_upload() -> Any:
     deployment_id = payload.get("deployment_id") or report.get("deployment_id")
     generated_at = payload.get("generated_at") or report.get("generated_at") or int(time.time() * 1e9)
 
-    safe_event = _safe_report_slug(event_id)
     node_key = _report_node_key(node_id, system_id)
-    if not safe_event or not node_key:
+    if not _safe_report_slug(event_id) or not node_key:
         return jsonify({"error": "invalid report identifiers"}), 400
-    timestamp_str = datetime.fromtimestamp(generated_at / 1e9).strftime("%Y%m%d_%H%M%S")
-    report_dir = os.path.join(REPORTS_PATH, "event", safe_event, node_key, timestamp_str)
-
-    report["report_type"] = "event"
-    report["event_id"] = event_id
+    report_payload = dict(report)
+    report_payload["report_type"] = "event"
+    report_payload["event_id"] = event_id
+    if event_id_original:
+        report_payload["event_id_original"] = event_id_original
     if node_id:
-        report["node_id"] = node_id
+        report_payload["node_id"] = node_id
     if system_id:
-        report["system_id"] = system_id
+        report_payload["system_id"] = system_id
     if deployment_id:
-        report["deployment_id"] = deployment_id
-    report["generated_at"] = generated_at
+        report_payload["deployment_id"] = deployment_id
+    report_payload["generated_at"] = generated_at
 
-    _write_json(os.path.join(report_dir, "data.json"), report)
-    if report_html:
-        html_path = os.path.join(report_dir, "report.html")
-        try:
-            with open(html_path, "w", encoding="utf-8") as handle:
-                handle.write(report_html)
-        except Exception:
-            pass
-    _write_json(
-        os.path.join(report_dir, "meta.json"),
+    stored = _store_report_bundle(
+        event_id,
+        node_key,
+        report_payload,
+        report_html,
         {
-            "report_type": "event",
-            "event_id": event_id,
             "node_id": node_id,
             "system_id": system_id,
             "deployment_id": deployment_id,
             "generated_at": generated_at,
-            "node_key": node_key,
+            "event_id_original": event_id_original or None,
+            "version": payload.get("version", "v2"),
         },
     )
+    if not stored:
+        return jsonify({"error": "unable to store report"}), 500
+
+    _write_aggregate_report(event_id)
 
     base_url = _report_base_url()
     safe_event_url = quote(event_id, safe="")
-    report_url = f"{base_url}/api/reports/event/{safe_event_url}/{node_key}"
-    return jsonify({"success": True, "report_url": report_url})
+    report_url = f"{base_url}/api/reports/{safe_event_url}/{node_key}/json"
+    report_html_url = f"{base_url}/api/reports/{safe_event_url}/{node_key}/html"
+    return jsonify(
+        {
+            "success": True,
+            "report_url": report_url,
+            "report_html_url": report_html_url,
+        }
+    )
 
 
 @app.route("/api/nodes/manual", methods=["POST"])

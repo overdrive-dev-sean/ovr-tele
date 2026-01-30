@@ -16,25 +16,29 @@ services:
     container_name: node-exporter
     command:
       - '--path.rootfs=/host'
-    network_mode: host
     pid: host
     restart: unless-stopped
     volumes:
       - '/:/host:ro,rslave'
+    networks:
+      default:
+        aliases:
+          - node_exporter
   vmagent:
     image: victoriametrics/vmagent:latest
     container_name: vmagent
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/ovr/site.env
+      - .env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
     ports:
       - "8429:8429"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./vmagent/entrypoint.sh:/entrypoint.sh:ro
       - /etc/ovr/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro
@@ -52,7 +56,7 @@ services:
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/ovr/site.env
+      - .env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
@@ -71,12 +75,13 @@ services:
     restart: unless-stopped
     network_mode: host
     env_file:
-      - /etc/ovr/site.env
+      - .env
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
-      - ./telegraf/telegraf.d:/etc/telegraf/telegraf.d:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - /etc/ovr/telegraf.d:/etc/telegraf/telegraf.d:ro
     command:
       - telegraf
       - --config
@@ -98,7 +103,7 @@ services:
       - event_data:/data
       - /etc/ovr/secrets:/etc/ovr/secrets:ro
     env_file:
-      - /etc/ovr/site.env
+      - .env
     environment:
       - DB_PATH=/data/events.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

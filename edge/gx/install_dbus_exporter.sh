@@ -6,7 +6,7 @@ PAYLOAD_DIR="${SRC_DIR}"
 if [ ! -f "${PAYLOAD_DIR}/dbus2prom.py" ] && [ -f "${SRC_DIR}/../dbus2prom.py" ]; then
   PAYLOAD_DIR="$(cd "${SRC_DIR}/.." && pwd)"
 fi
-INSTALL_DIR="/data/overdrive/dbus2prom"
+INSTALL_DIR="/data/ovr/dbus2prom"
 SERVICE_DIR="/service/ovr-dbus2prom"
 
 need_file() {

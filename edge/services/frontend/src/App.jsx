@@ -343,10 +343,13 @@ export default function App() {
   const mapFleet = mapStatus?.fleet || {};
   const mapLocal = mapStatus?.local || {};
   const mapPct = mapStatus?.pct || {};
+  const satelliteAllowed = mapStatus?.satelliteAllowed !== false;
   const mapMonthLabel = formatMonthKey(mapStatus?.month_key);
   const guardrailPct = mapStatus?.thresholds?.guardrailPct ?? 0.95;
   const guardrailPctLabel = Math.round(guardrailPct * 100);
   const mapBothBlocked = Boolean(mapBlocked?.mapbox && mapBlocked?.esri);
+  const mapWarning =
+    mapStatus?.warning || (!satelliteAllowed ? 'Satellite imagery disabled due to budget limits.' : '');
   const hudLabel = (provider) => (provider === 'mapbox' ? 'Mapbox' : 'Esri World');
   const localHudCount = (provider) => {
     const serverValue = mapLocal?.[provider];
@@ -627,6 +630,7 @@ export default function App() {
         setMapUsage(buildEmptyUsage(data.month_key));
       }
       const recommended = data.recommendedProvider || data.preferredProvider;
+      const allowTiles = data.satelliteAllowed !== false;
       const stored =
         activeProviderRef.current ||
         (typeof window !== 'undefined'
@@ -642,7 +646,8 @@ export default function App() {
         nextProvider &&
         nextProvider !== activeProviderRef.current &&
         !bothBlocked &&
-        !cloudUnavailable
+        !cloudUnavailable &&
+        allowTiles
       ) {
         setActiveProvider(nextProvider);
         if (activeProviderRef.current) {
@@ -661,6 +666,12 @@ export default function App() {
     if (!mapTileCacheEnabled) {
       if (reason === 'manual') {
         showModal('Map caching is disabled for this tile URL.', 'error');
+      }
+      return;
+    }
+    if (!satelliteAllowed) {
+      if (reason === 'manual') {
+        showModal('Satellite imagery is disabled due to budget limits.', 'error');
       }
       return;
     }
@@ -921,6 +932,15 @@ export default function App() {
   }, [activeServices]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const eventParam = params.get('event_id');
+    if (eventParam && !eventIdInput) {
+      setEventIdInput(eventParam);
+    }
+  }, []);
+
+  useEffect(() => {
     if (activeEventId) {
       loadNotes(activeEventId);
     } else if (eventIdInput) {
@@ -980,11 +1000,6 @@ export default function App() {
       }));
 
   const startEvent = async () => {
-    const eventId = eventIdInput.trim();
-    if (!eventId) {
-      showModal('Event ID is required', 'error');
-      return;
-    }
     const loggers = getSelectedLoggers();
     if (loggers.length === 0) {
       showModal('At least one logger required', 'error');
@@ -992,14 +1007,27 @@ export default function App() {
     }
 
     try {
+      let eventId = eventIdInput.trim();
       for (let i = 0; i < loggers.length; i += 1) {
         const logger = loggers[i];
-        await postJson('/event/start', {
+        const payload = {
           system_id: logger.service,
-          event_id: eventId,
           location: logger.location || '',
           note: i === 0 ? noteText.trim() : ''
-        });
+        };
+        if (eventId) {
+          payload.event_id = eventId;
+        }
+        const result = await postJson('/event/start', payload);
+        if (!eventId) {
+          eventId = result?.event_id || '';
+          if (eventId) {
+            setEventIdInput(eventId);
+          }
+        }
+      }
+      if (!eventId) {
+        throw new Error('Missing event ID in response');
       }
       showModal(`Event "${eventId}" started with ${loggers.length} logger(s)`, 'success');
       setNoteText('');
@@ -1791,16 +1819,18 @@ export default function App() {
                   {['mapbox', 'esri'].map((provider) => {
                     const label = mapProviders?.[provider]?.label || provider;
                     const blocked = mapBlocked?.[provider];
-                    const reason = blocked
-                      ? `${guardrailPctLabel}% free tier reached for ${mapMonthLabel}`
-                      : `Switch to ${label}`;
+                    const reason = !satelliteAllowed
+                      ? 'Satellite imagery disabled due to budget limits.'
+                      : blocked
+                        ? `${guardrailPctLabel}% free tier reached for ${mapMonthLabel}`
+                        : `Switch to ${label}`;
                     return (
                       <button
                         key={provider}
                         className={`map-provider-btn ${
                           activeProvider === provider ? 'active' : ''
                         } ${blocked ? 'blocked' : ''}`}
-                        disabled={blocked}
+                        disabled={blocked || !satelliteAllowed}
                         title={reason}
                         onClick={() => selectMapProvider(provider)}
                       >
@@ -1831,8 +1861,8 @@ export default function App() {
               </div>
             </div>
           </div>
-        {mapStatus?.warning && (
-          <div className={`map-warning ${mapBothBlocked ? 'critical' : ''}`}>{mapStatus.warning}</div>
+        {mapWarning && (
+          <div className={`map-warning ${mapBothBlocked ? 'critical' : ''}`}>{mapWarning}</div>
         )}
           <div className="map-shell">
             <MapPanel
@@ -1842,6 +1872,7 @@ export default function App() {
               activeProvider={activeProvider}
               onTileAttempt={incrementMapUsage}
               defaultZoom={MAP_DEFAULT_ZOOM}
+              tilesEnabled={satelliteAllowed}
               isActive={activeTab === 'map'}
             />
           </div>

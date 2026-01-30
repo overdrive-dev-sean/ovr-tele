@@ -124,7 +124,7 @@ Query examples:
 
 **One command**:
 ```bash
-cd /opt/edge
+cd /opt/ovr/edge
 sudo docker compose -f compose.dev.yml up -d --build events
 ```
 

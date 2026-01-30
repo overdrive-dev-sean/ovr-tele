@@ -5,16 +5,18 @@
 # - Third-party dependencies MUST be pinned per edge release (avoid :latest).
 #
 # Usage on a node:
-#   cd /opt/edge/edge
-#   # First-time: copy and edit edge.env with pinned third-party images.
-#   cp edge.env.example edge.env
+#   cd /opt/ovr/edge
+#   # First-time: create /etc/ovr/edge.env (or copy from example) and link .env
+#   sudo mkdir -p /etc/ovr
+#   sudo cp edge.env.example /etc/ovr/edge.env
+#   sudo ln -sf /etc/ovr/edge.env .env
 #   # Then:
-#   docker compose --env-file edge.env -f compose.release.yml pull
-#   docker compose --env-file edge.env -f compose.release.yml up -d
+#   docker compose -f compose.release.yml pull
+#   docker compose -f compose.release.yml up -d
 
 services:
   victoria-metrics:
-    image: ${VM_IMAGE:?Set VM_IMAGE in edge.env (pin by tag or digest; no latest tag)}
+    image: ${VM_IMAGE:?Set VM_IMAGE in .env (symlink to /etc/ovr/edge.env; pin by tag or digest; no latest tag)}
     container_name: victoria-metrics
     command:
       - "-storageDataPath=/storage"
@@ -27,30 +29,34 @@ services:
     restart: unless-stopped
 
   node-exporter:
-    image: ${NODE_EXPORTER_IMAGE:?Set NODE_EXPORTER_IMAGE in edge.env (pin by tag or digest; no latest tag)}
+    image: ${NODE_EXPORTER_IMAGE:?Set NODE_EXPORTER_IMAGE in .env (symlink to /etc/ovr/edge.env; pin by tag or digest; no latest tag)}
     container_name: node-exporter
     command:
       - '--path.rootfs=/host'
-    network_mode: host
     pid: host
     restart: unless-stopped
     volumes:
       - '/:/host:ro,rslave'
+    networks:
+      default:
+        aliases:
+          - node_exporter
 
   vmagent:
-    image: ${VMAGENT_IMAGE:?Set VMAGENT_IMAGE in edge.env (pin by tag or digest; no latest tag)}
+    image: ${VMAGENT_IMAGE:?Set VMAGENT_IMAGE in .env (symlink to /etc/ovr/edge.env; pin by tag or digest; no latest tag)}
     container_name: vmagent
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/ovr/site.env
+      - .env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
     ports:
       - "8429:8429"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./vmagent/entrypoint.sh:/entrypoint.sh:ro
       - /etc/ovr/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro
@@ -63,12 +69,12 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: ${GRAFANA_IMAGE:?Set GRAFANA_IMAGE in edge.env (pin by tag or digest; no latest tag)}
+    image: ${GRAFANA_IMAGE:?Set GRAFANA_IMAGE in .env (symlink to /etc/ovr/edge.env; pin by tag or digest; no latest tag)}
     container_name: grafana
     depends_on:
       - victoria-metrics
     env_file:
-      - /etc/ovr/site.env
+      - .env
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
@@ -81,19 +87,20 @@ services:
     restart: unless-stopped
 
   telegraf:
-    image: ${TELEGRAF_IMAGE:?Set TELEGRAF_IMAGE in edge.env (pin by tag or digest; no latest tag)}
+    image: ${TELEGRAF_IMAGE:?Set TELEGRAF_IMAGE in .env (symlink to /etc/ovr/edge.env; pin by tag or digest; no latest tag)}
     container_name: telegraf
     depends_on:
       - victoria-metrics
     restart: unless-stopped
     network_mode: host
     env_file:
-      - /etc/ovr/site.env
+      - .env
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
-      - ./telegraf/telegraf.d:/etc/telegraf/telegraf.d:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - /etc/ovr/telegraf.d:/etc/telegraf/telegraf.d:ro
     command:
       - telegraf
       - --config
@@ -104,7 +111,7 @@ services:
       - poll
 
   events:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in edge.env}/edge-events:${EDGE_VERSION:-dev}
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in .env}/edge-events:${EDGE_VERSION:-dev}
     container_name: events
     depends_on:
       - victoria-metrics
@@ -114,7 +121,7 @@ services:
       - event_data:/data
       - /etc/ovr/secrets:/etc/ovr/secrets:ro
     env_file:
-      - /etc/ovr/site.env
+      - .env
     environment:
       - DB_PATH=/data/events.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -123,7 +130,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in edge.env}/edge-frontend:${EDGE_VERSION:-dev}
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER in .env}/edge-frontend:${EDGE_VERSION:-dev}
     container_name: frontend
     depends_on:
       - events

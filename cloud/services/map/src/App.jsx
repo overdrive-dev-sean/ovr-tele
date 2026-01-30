@@ -9,6 +9,7 @@ const EVENT_STALE_SECONDS = 300;
 const MAP_USAGE_STORAGE_KEY = 'ovr_fleet_map_usage_v1';
 const MAP_PROVIDER_STORAGE_KEY = 'ovr_fleet_map_provider_v1';
 const MAP_STATUS_POLL_MS = 15000;
+const MAP_USAGE_FLUSH_MS = 30000;
 const PLACEHOLDER_DEPLOYMENT_IDS = new Set(['__DEPLOYMENT_ID__', '__DEPLOYEMENT_ID__']);
 
 const isPlaceholderDeployment = (value) => {
@@ -95,7 +96,8 @@ const monthKeyUtc = () => new Date().toISOString().slice(0, 7);
 
 const buildEmptyUsage = (monthKey) => ({
   monthKey,
-  counts: { mapbox: 0, esri: 0 }
+  counts: { mapbox: 0, esri: 0 },
+  pending: { mapbox: 0, esri: 0 }
 });
 
 const loadMapUsage = () => {
@@ -110,6 +112,10 @@ const loadMapUsage = () => {
       counts: {
         mapbox: Number(parsed.counts?.mapbox || 0),
         esri: Number(parsed.counts?.esri || 0)
+      },
+      pending: {
+        mapbox: Number(parsed.pending?.mapbox || 0),
+        esri: Number(parsed.pending?.esri || 0)
       }
     };
   } catch (err) {
@@ -145,29 +151,21 @@ const formatReportTimestamp = (value) => {
   return new Date(ms).toLocaleString();
 };
 
-const buildNodesUrl = (deploymentIds, eventId) => {
+const formatEventTimestamp = (value) => {
+  const ms = Number(value) * 1000;
+  if (!Number.isFinite(ms) || ms <= 0) return '--';
+  return new Date(ms).toLocaleString();
+};
+
+const buildNodesUrl = (deploymentIds) => {
   const params = new URLSearchParams();
   if (deploymentIds && deploymentIds.length) {
     deploymentIds.forEach((id) => params.append('deployment_id', id));
-  }
-  if (eventId) {
-    params.append('event_id', eventId);
   }
   if ([...params.keys()].length === 0) {
     return `${API_BASE}/nodes`;
   }
   return `${API_BASE}/nodes?${params.toString()}`;
-};
-
-const buildEventsUrl = (deploymentIds) => {
-  const params = new URLSearchParams();
-  if (deploymentIds && deploymentIds.length) {
-    deploymentIds.forEach((id) => params.append('deployment_id', id));
-  }
-  if ([...params.keys()].length === 0) {
-    return `${API_BASE}/events`;
-  }
-  return `${API_BASE}/events?${params.toString()}`;
 };
 
 const getStatusClass = (node) => {
@@ -244,7 +242,7 @@ const buildGroupMarkerSize = (rows) => {
   return { width, height };
 };
 
-const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventIdOverride) => {
+const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventLabel) => {
   const status = getGroupStatus(groupNodes);
   const labelSource = group.primary || group.mapNode || groupNodes[0];
   const label = escapeHtml(labelSource?.system_id || group.key);
@@ -253,8 +251,7 @@ const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventIdOverride) =>
     0
   );
   const alerts = alertCount > 0 ? `!${alertCount}` : '';
-  const eventIdRaw = eventIdOverride || labelSource?.event_id;
-  const eventId = eventIdRaw ? escapeHtml(eventIdRaw) : '';
+  const eventId = eventLabel ? escapeHtml(eventLabel) : '';
   const eventCount = eventGroup?.count ? ` (${eventGroup.count})` : '';
   const eventTag = eventId
     ? `<div class="marker-event" title="${eventId}${eventCount}">${eventId}${eventCount}</div>`
@@ -311,7 +308,7 @@ const buildSpiderfyPositions = (center, count) => {
   return positions;
 };
 
-const buildMarkerHtml = (node, eventLoggers) => {
+const buildMarkerHtml = (node, eventLoggers, eventLabel) => {
   const status = getStatusClass(node);
   const label = escapeHtml(node.system_id);
   const isLogger = Boolean(node.is_logger);
@@ -327,7 +324,7 @@ const buildMarkerHtml = (node, eventLoggers) => {
       : '--'
     : formatPower(node.pout);
   const alerts = node.alerts_count > 0 ? `!${node.alerts_count}` : '';
-  const eventId = node.event_id ? escapeHtml(node.event_id) : '';
+  const eventId = eventLabel ? escapeHtml(eventLabel) : '';
   const eventCount = eventLoggers && eventLoggers.length ? ` (${eventLoggers.length})` : '';
   const eventTag = eventId
     ? `<div class="marker-event" title="${eventId}${eventCount}">${eventId}${eventCount}</div>`
@@ -351,10 +348,10 @@ const buildMarkerHtml = (node, eventLoggers) => {
   `;
 };
 
-const buildPopupHtml = (node, eventDetails, eventIdOverride) => {
+const buildPopupHtml = (node, eventDetails, eventLabel) => {
   const location = node.location ? escapeHtml(node.location) : '--';
   const alerts = node.alerts && node.alerts.length ? escapeHtml(node.alerts.join(', ')) : 'None';
-  const rawEventId = eventIdOverride || node.event_id;
+  const rawEventId = eventLabel || node.event_id;
   const eventId = rawEventId ? escapeHtml(rawEventId) : '--';
   const isLogger = Boolean(node.is_logger);
   const hasAcuvim = isLogger && node.acuvim_updated_at !== null && node.acuvim_updated_at !== undefined;
@@ -396,11 +393,17 @@ export default function App() {
   const [selectedDeployments, setSelectedDeployments] = useState([]);
   const [events, setEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState('');
-  const [reportMonths, setReportMonths] = useState([]);
+  const [eventNameInput, setEventNameInput] = useState('');
+  const [eventCreateConflict, setEventCreateConflict] = useState(null);
+  const [pendingEventId, setPendingEventId] = useState('');
+  const [pendingEventName, setPendingEventName] = useState('');
+  const [selectedNodeIds, setSelectedNodeIds] = useState([]);
+  const [aliasNodeInput, setAliasNodeInput] = useState('');
+  const [aliasTempEventInput, setAliasTempEventInput] = useState('');
   const [reportEvents, setReportEvents] = useState([]);
-  const [selectedReportMonth, setSelectedReportMonth] = useState('');
   const [selectedReportEvent, setSelectedReportEvent] = useState('');
   const [reportItems, setReportItems] = useState([]);
+  const [reportAggregate, setReportAggregate] = useState(null);
   const [reportMessage, setReportMessage] = useState('');
   const [mapStatus, setMapStatus] = useState(null);
   const [mapProviders, setMapProviders] = useState({
@@ -434,9 +437,40 @@ export default function App() {
   const lastRecommendedRef = useRef(null);
 
   const pollSeconds = POLL_INTERVALS[pollIndex] || POLL_INTERVALS[POLL_INTERVALS.length - 1];
+  const eventNameMap = useMemo(() => {
+    const map = new Map();
+    events.forEach((event) => {
+      const label = event.event_name || event.name || event.event_id;
+      if (event.event_id && label) {
+        map.set(event.event_id, label);
+      }
+    });
+    if (pendingEventId && pendingEventName) {
+      map.set(pendingEventId, pendingEventName);
+    }
+    return map;
+  }, [events, pendingEventId, pendingEventName]);
+  const eventLabelForId = (eventId) => {
+    if (!eventId) return '';
+    return eventNameMap.get(eventId) || eventId;
+  };
+  const selectedEventDetail = useMemo(
+    () => events.find((event) => event.event_id === selectedEvent) || null,
+    [events, selectedEvent]
+  );
+  const activeEventsCount = useMemo(
+    () => {
+      if (!events.length) return 0;
+      const hasStatus = events.some((event) => event.status);
+      if (!hasStatus) return events.length;
+      return events.filter((event) => event.status === 'active').length;
+    },
+    [events]
+  );
   const mapBlocked = mapStatus?.blocked || {};
   const mapFleet = mapStatus?.fleet || {};
   const mapPct = mapStatus?.pct || {};
+  const satelliteAllowed = mapStatus?.satelliteAllowed !== false;
   const mapMonthLabel = formatMonthKey(mapStatus?.month_key);
   const guardrailPct = mapStatus?.thresholds?.guardrailPct ?? 0.95;
   const guardrailPctLabel = Math.round(guardrailPct * 100);
@@ -473,6 +507,16 @@ export default function App() {
   }, [mapUsage]);
 
   useEffect(() => {
+    const handleUnload = () => flushMapUsage(true);
+    const interval = setInterval(() => flushMapUsage(false), MAP_USAGE_FLUSH_MS);
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, [selectedDeployments]);
+
+  useEffect(() => {
     activeProviderRef.current = activeProvider;
     try {
       window.localStorage.setItem(MAP_PROVIDER_STORAGE_KEY, activeProvider);
@@ -499,7 +543,43 @@ export default function App() {
     return false;
   };
 
-  const visibleNodes = useMemo(() => nodes.filter(hasFreshSignal), [nodes]);
+  const filteredNodes = useMemo(() => {
+    if (!selectedEvent) return nodes;
+    return nodes.filter((node) => node.event_id === selectedEvent);
+  }, [nodes, selectedEvent]);
+  const visibleNodes = useMemo(
+    () => filteredNodes.filter(hasFreshSignal),
+    [filteredNodes]
+  );
+  const liveEventNodes = useMemo(() => {
+    if (!selectedEvent) return [];
+    const ids = new Set();
+    nodes.forEach((node) => {
+      if (node.event_id === selectedEvent && node.node_id) {
+        ids.add(node.node_id);
+      }
+    });
+    return [...ids];
+  }, [nodes, selectedEvent]);
+  const availableNodes = useMemo(() => {
+    const seen = new Set();
+    const options = [];
+    nodes.forEach((node) => {
+      if (!hasFreshSignal(node)) return;
+      if (node.is_logger) return;
+      const nodeId = node.node_id ? String(node.node_id).trim() : '';
+      if (!nodeId || seen.has(nodeId)) return;
+      seen.add(nodeId);
+      options.push({
+        node_id: nodeId,
+        system_id: node.system_id,
+        deployment_id: node.deployment_id,
+        location: node.location
+      });
+    });
+    options.sort((a, b) => String(a.system_id).localeCompare(String(b.system_id)));
+    return options;
+  }, [nodes]);
 
   const getGroupKey = (node) =>
     node.node_id || node.host_system_id || node.system_id || 'unknown';
@@ -677,8 +757,7 @@ export default function App() {
 
   const fetchNodes = async () => {
     try {
-      const effectiveEvent = events.length === 0 ? '' : selectedEvent;
-      const resp = await fetch(buildNodesUrl(selectedDeployments, effectiveEvent), { cache: 'no-store' });
+      const resp = await fetch(buildNodesUrl(selectedDeployments), { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load nodes');
       const payload = await resp.json();
       setNodes(payload.nodes || []);
@@ -708,20 +787,31 @@ export default function App() {
 
   const fetchEvents = async () => {
     try {
-      const resp = await fetch(buildEventsUrl(selectedDeployments), { cache: 'no-store' });
+      const params = new URLSearchParams();
+      if (selectedDeployments.length) {
+        selectedDeployments.forEach((id) => params.append('deployment_id', id));
+      }
+      const url = params.toString()
+        ? `${API_BASE}/events?${params.toString()}`
+        : `${API_BASE}/events`;
+      const resp = await fetch(url, { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load events');
       const payload = await resp.json();
       const items = Array.isArray(payload.events) ? payload.events : [];
       const eventIds = items.map((item) => item.event_id).filter(Boolean);
-      setEvents(eventIds);
+      setEvents(items);
       if (eventIds.length === 0) {
-        if (selectedEvent) setSelectedEvent('');
-      } else if (selectedEvent && !eventIds.includes(selectedEvent)) {
+        if (selectedEvent && selectedEvent !== pendingEventId) setSelectedEvent('');
+      } else if (
+        selectedEvent &&
+        !eventIds.includes(selectedEvent) &&
+        selectedEvent !== pendingEventId
+      ) {
         setSelectedEvent('');
       }
     } catch (err) {
       setEvents([]);
-      if (selectedEvent) {
+      if (selectedEvent && selectedEvent !== pendingEventId) {
         setSelectedEvent('');
       }
     }
@@ -729,64 +819,195 @@ export default function App() {
 
   const fetchReportSummary = async () => {
     try {
-      const resp = await fetch(`${API_BASE}/reports`, { cache: 'no-store' });
+      const resp = await fetch(`${API_BASE}/reports/events`, { cache: 'no-store' });
       if (!resp.ok) throw new Error('Failed to load reports');
       const payload = await resp.json();
-      setReportMonths(Array.isArray(payload.months) ? payload.months : []);
-      setReportEvents(Array.isArray(payload.events) ? payload.events : []);
+      const items = Array.isArray(payload.events) ? payload.events : [];
+      const filtered = items.filter((entry) => entry.has_reports);
+      setReportEvents(filtered);
+      const ids = filtered.map((entry) => entry.event_id).filter(Boolean);
+      if (selectedReportEvent && !ids.includes(selectedReportEvent)) {
+        setSelectedReportEvent('');
+      }
       setReportMessage('');
     } catch (err) {
-      setReportMonths([]);
       setReportEvents([]);
       setReportMessage('Reports unavailable.');
     }
   };
 
-  const fetchMonthlyReports = async (monthKey) => {
+  const fetchEventReports = async (eventId) => {
     try {
-      const resp = await fetch(`${API_BASE}/reports/monthly?month=${encodeURIComponent(monthKey)}`, {
+      const resp = await fetch(`${API_BASE}/reports/${encodeURIComponent(eventId)}`, {
         cache: 'no-store',
       });
-      if (!resp.ok) throw new Error('Failed to load monthly reports');
+      if (!resp.ok) throw new Error('Failed to load event reports');
       const payload = await resp.json();
       const reports = Array.isArray(payload.reports) ? payload.reports : [];
+      const aggregate = payload.aggregate || null;
       setReportItems(
         reports.map((entry) => ({
           id: entry.node_key || entry.system_id || entry.node_id,
           label: entry.node_id || entry.system_id || entry.node_key || 'Unknown node',
           meta: `Updated ${formatReportTimestamp(entry.generated_at)}`,
           reportUrl: entry.report_html_url || entry.report_url,
-          downloadUrl: entry.download_url
+          downloadUrl: entry.report_json_url || entry.download_url
         }))
       );
-      setReportMessage(reports.length ? '' : 'No monthly reports yet.');
-    } catch (err) {
-      setReportItems([]);
-      setReportMessage('Unable to load monthly reports.');
-    }
-  };
-
-  const fetchEventReports = async (eventId) => {
-    try {
-      const resp = await fetch(`${API_BASE}/reports/event?event_id=${encodeURIComponent(eventId)}`, {
-        cache: 'no-store',
-      });
-      if (!resp.ok) throw new Error('Failed to load event reports');
-      const payload = await resp.json();
-      const reports = Array.isArray(payload.reports) ? payload.reports : [];
-      setReportItems(
-        reports.map((entry) => ({
-          id: entry.node_key || entry.system_id || entry.node_id,
-          label: entry.node_id || entry.system_id || entry.node_key || 'Unknown node',
-          meta: `Updated ${formatReportTimestamp(entry.generated_at)}`,
-          reportUrl: entry.report_url,
-          downloadUrl: entry.download_url
-        }))
-      );
+      setReportAggregate(aggregate && aggregate.available ? aggregate : null);
       setReportMessage(reports.length ? '' : 'No event reports yet.');
     } catch (err) {
       setReportItems([]);
+      setReportAggregate(null);
       setReportMessage('Unable to load event reports.');
+    }
+  };
+
+  const submitCreateEvent = async (nameOverride) => {
+    const name = (nameOverride || eventNameInput).trim();
+    if (!name) {
+      setStatusMessage('Enter an event name to create.');
+      return;
+    }
+    setEventCreateConflict(null);
+    try {
+      const resp = await fetch(`${API_BASE}/events/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event_name: name })
+      });
+      if (resp.status === 409) {
+        const payload = await resp.json();
+        setEventCreateConflict(payload);
+        setStatusMessage('Event name already exists.');
+        return;
+      }
+      if (!resp.ok) throw new Error('Failed to create event');
+      const payload = await resp.json();
+      await fetchEvents();
+      setEventNameInput('');
+      if (payload?.event_id) {
+        setSelectedEvent(payload.event_id);
+        setPendingEventId(payload.event_id);
+        setPendingEventName(payload?.event_name || payload?.name || name);
+        setSelectedNodeIds([]);
+      }
+      setStatusMessage(`Event created: ${payload?.event_name || payload?.name || name}`);
+    } catch (err) {
+      setStatusMessage('Unable to create event.');
+    }
+  };
+
+  const createEvent = async () => {
+    await submitCreateEvent();
+  };
+
+  const useExistingEvent = () => {
+    const existing = eventCreateConflict?.existing;
+    if (!existing?.event_id) return;
+    setSelectedEvent(existing.event_id);
+    setPendingEventId(existing.event_id);
+    setPendingEventName(existing.event_name || existing.event_id);
+    setEventCreateConflict(null);
+    setStatusMessage(`Using existing event: ${existing.event_name || existing.event_id}`);
+  };
+
+  const useSuggestedEventName = async () => {
+    const suggested = eventCreateConflict?.suggested?.event_name;
+    if (!suggested) return;
+    setEventNameInput(suggested);
+    setEventCreateConflict(null);
+    await submitCreateEvent(suggested);
+  };
+
+  const endEvent = async () => {
+    if (!selectedEvent) return;
+    if (!window.confirm('End this event?')) return;
+    try {
+      const resp = await fetch(`${API_BASE}/events/${encodeURIComponent(selectedEvent)}/end`, {
+        method: 'POST'
+      });
+      if (!resp.ok) throw new Error('Failed to end event');
+      await fetchEvents();
+      setStatusMessage('Event ended.');
+      if (pendingEventId === selectedEvent) {
+        setPendingEventId('');
+        setPendingEventName('');
+      }
+    } catch (err) {
+      setStatusMessage('Unable to end event.');
+    }
+  };
+
+  const toggleNodeSelection = (nodeId) => {
+    setSelectedNodeIds((prev) => {
+      if (prev.includes(nodeId)) {
+        return prev.filter((id) => id !== nodeId);
+      }
+      return [...prev, nodeId];
+    });
+  };
+
+  const addNodesToEvent = async () => {
+    if (!selectedEvent) {
+      setStatusMessage('Select an event before adding nodes.');
+      return;
+    }
+    if (!selectedNodeIds.length) {
+      setStatusMessage('Select at least one node to add.');
+      return;
+    }
+    try {
+      const resp = await fetch(
+        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/add_nodes`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ node_ids: selectedNodeIds })
+        }
+      );
+      if (!resp.ok) throw new Error('Failed to add nodes');
+      const payload = await resp.json();
+      setSelectedNodeIds([]);
+      await fetchNodes();
+      if (pendingEventId === selectedEvent) {
+        setPendingEventId('');
+        setPendingEventName('');
+      }
+      const addedCount = payload?.added?.length ?? selectedNodeIds.length;
+      const missingCount = payload?.missing?.length ?? 0;
+      const missingNote = missingCount ? ` (${missingCount} missing)` : '';
+      setStatusMessage(`Added ${addedCount} node(s) to event${missingNote}.`);
+    } catch (err) {
+      setStatusMessage('Unable to add nodes to event.');
+    }
+  };
+
+  const mergeTempEvent = async () => {
+    const nodeId = aliasNodeInput.trim();
+    const tempEventId = aliasTempEventInput.trim();
+    if (!selectedEvent || !nodeId || !tempEventId) {
+      setStatusMessage('Select an event and enter node + temp event id.');
+      return;
+    }
+    if (!window.confirm('Merge temp event into selected event?')) return;
+    try {
+      const resp = await fetch(
+        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/aliases`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ node_id: nodeId, temp_event_id: tempEventId })
+        }
+      );
+      if (!resp.ok) throw new Error('Failed to merge temp event');
+      setAliasNodeInput('');
+      setAliasTempEventInput('');
+      await fetchEvents();
+      await fetchReportSummary();
+      setStatusMessage(`Merged temp event ${tempEventId} for ${nodeId}.`);
+    } catch (err) {
+      setStatusMessage('Unable to merge temp event.');
     }
   };
 
@@ -835,8 +1056,55 @@ export default function App() {
         counts: {
           ...base.counts,
           [provider]: (base.counts?.[provider] || 0) + 1
+        },
+        pending: {
+          ...base.pending,
+          [provider]: (base.pending?.[provider] || 0) + 1
         }
       };
+    });
+  };
+
+  const flushMapUsage = async (useBeacon = false) => {
+    const usage = mapUsageRef.current;
+    if (!usage) return;
+    const entries = Object.entries(usage.pending || {}).filter(([, count]) => count > 0);
+    if (entries.length === 0) return;
+
+    const deploymentId = selectedDeployments.length === 1 ? selectedDeployments[0] : '';
+    const payloadBase = {
+      node_id: 'fleet-map',
+      month: usage.monthKey,
+      deployment_id: deploymentId || undefined
+    };
+
+    if (useBeacon && navigator.sendBeacon) {
+      entries.forEach(([provider, count]) => {
+        const payload = JSON.stringify({ provider, delta: count, ...payloadBase });
+        navigator.sendBeacon('/api/tiles/usage', new Blob([payload], { type: 'application/json' }));
+      });
+      return;
+    }
+
+    const nextPending = { ...usage.pending };
+    for (const [provider, count] of entries) {
+      try {
+        const resp = await fetch('/api/tiles/usage', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, delta: count, ...payloadBase })
+        });
+        if (resp.ok) {
+          nextPending[provider] = 0;
+        }
+      } catch (err) {
+        // Keep pending count for retry.
+      }
+    }
+
+    setMapUsage((prev) => {
+      if (prev.monthKey !== usage.monthKey) return prev;
+      return { ...prev, pending: nextPending };
     });
   };
 
@@ -863,6 +1131,7 @@ export default function App() {
         setMapUsage(buildEmptyUsage(data.month_key));
       }
       const recommended = data.recommendedProvider || data.preferredProvider;
+      const allowTiles = data.satelliteAllowed !== false;
       const stored = window.localStorage.getItem(MAP_PROVIDER_STORAGE_KEY);
       const nextProvider = recommended || stored;
       const bothBlocked = data.blocked?.mapbox && data.blocked?.esri;
@@ -874,7 +1143,8 @@ export default function App() {
         nextProvider &&
         nextProvider !== activeProviderRef.current &&
         !bothBlocked &&
-        !cloudUnavailable
+        !cloudUnavailable &&
+        allowTiles
       ) {
         setActiveProvider(nextProvider);
         if (activeProviderRef.current) {
@@ -893,7 +1163,10 @@ export default function App() {
 
   const selectMapProvider = async (provider) => {
     if (!provider || provider === activeProviderRef.current) return;
-    const label = mapProviders?.[provider]?.label || provider;
+    if (!satelliteAllowed) {
+      setStatusMessage('Satellite imagery disabled due to budget limits.');
+      return;
+    }
     const fallback = provider === 'mapbox' ? 'esri' : 'mapbox';
     const blocked = mapBlocked?.[provider];
     const fallbackBlocked = mapBlocked?.[fallback];
@@ -980,7 +1253,16 @@ export default function App() {
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !mapProviders) return;
+    if (!map) return;
+    if (!satelliteAllowed) {
+      if (baseLayerRef.current) {
+        baseLayerRef.current.off('tileloadstart');
+        map.removeLayer(baseLayerRef.current);
+        baseLayerRef.current = null;
+      }
+      return;
+    }
+    if (!mapProviders) return;
     const provider =
       mapProviders[activeProvider] || mapProviders.esri || Object.values(mapProviders)[0];
     if (!provider || !provider.url) return;
@@ -1000,7 +1282,7 @@ export default function App() {
     layer.on('tileloadstart', () => incrementMapUsage(provider.id || activeProvider));
     layer.addTo(map);
     baseLayerRef.current = layer;
-  }, [mapProviders, activeProvider]);
+  }, [mapProviders, activeProvider, satelliteAllowed]);
 
   useEffect(() => {
     fetchMapStatus();
@@ -1019,21 +1301,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    fetchEvents();
+    const interval = setInterval(fetchEvents, 60000);
+    return () => clearInterval(interval);
+  }, [selectedDeployments, pendingEventId]);
+
+  useEffect(() => {
     fetchNodes();
   }, [selectedDeployments, selectedEvent]);
 
   useEffect(() => {
-    if (selectedReportMonth) {
-      fetchMonthlyReports(selectedReportMonth);
-      return;
-    }
     if (selectedReportEvent) {
       fetchEventReports(selectedReportEvent);
       return;
     }
     setReportItems([]);
+    setReportAggregate(null);
     setReportMessage('');
-  }, [selectedReportMonth, selectedReportEvent]);
+  }, [selectedReportEvent]);
 
   useEffect(() => {
     if (pollTimeoutRef.current) {
@@ -1072,11 +1357,12 @@ export default function App() {
       const groupEventId = groupEventNode?.event_id;
       const eventGroup = getEventGroup(groupEventId);
       const eventDetails = formatEventGroupHtml(eventGroup);
+      const eventLabel = groupEventId ? eventLabelForId(groupEventId) : '';
       const groupNodes = getGroupNodes(group);
       const groupSize = buildGroupMarkerSize(groupNodes.length);
       const icon = L.divIcon({
         className: 'marker-wrapper',
-        html: buildGroupMarkerHtml(group, groupNodes, eventGroup, groupEventId),
+        html: buildGroupMarkerHtml(group, groupNodes, eventGroup, eventLabel),
         iconSize: [groupSize.width, groupSize.height],
         iconAnchor: [groupSize.width / 2, groupSize.height],
       });
@@ -1087,14 +1373,14 @@ export default function App() {
           icon,
           draggable: displayNode.gps_source === 'manual',
         });
-        marker.bindPopup(buildPopupHtml(displayNode, eventDetails, groupEventId));
+        marker.bindPopup(buildPopupHtml(displayNode, eventDetails, eventLabel));
         marker.addTo(map);
         markers.set(key, marker);
       } else {
         marker.setLatLng(coords);
         marker.setIcon(icon);
         if (marker.getPopup()) {
-          marker.setPopupContent(buildPopupHtml(displayNode, eventDetails, groupEventId));
+          marker.setPopupContent(buildPopupHtml(displayNode, eventDetails, eventLabel));
         }
       }
 
@@ -1132,14 +1418,15 @@ export default function App() {
           const childEventGroup = getEventGroup(node.event_id);
           const childEventLoggers = getNodeEventLoggers(childEventGroup, node);
           const childDetails = formatEventGroupHtml(childEventGroup);
+          const childEventLabel = node.event_id ? eventLabelForId(node.event_id) : '';
           const childIcon = L.divIcon({
             className: 'marker-wrapper',
-            html: buildMarkerHtml(node, childEventLoggers),
+            html: buildMarkerHtml(node, childEventLoggers, childEventLabel),
             iconSize: [150, 60],
             iconAnchor: [75, 60],
           });
           const childMarker = L.marker([pos.lat, pos.lon], { icon: childIcon });
-          childMarker.bindPopup(buildPopupHtml(node, childDetails));
+          childMarker.bindPopup(buildPopupHtml(node, childDetails, childEventLabel));
           childMarker.addTo(map);
           children.push(childMarker);
         });
@@ -1163,7 +1450,7 @@ export default function App() {
       map.fitBounds(bounds.pad(0.2));
       hasFitRef.current = true;
     }
-  }, [gpsGroups, expandedGroups]);
+  }, [gpsGroups, expandedGroups, eventNameMap]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1248,25 +1535,178 @@ export default function App() {
           </details>
         </div>
 
-        {events.length > 0 ? (
-          <div className="panel">
-            <div className="panel-title">Active Events</div>
-            <div className="event-select">
-              <select
-                value={selectedEvent}
-                onChange={(event) => setSelectedEvent(event.target.value)}
-              >
-                <option value="">All events</option>
-                {events.map((eventId) => (
-                  <option key={eventId} value={eventId}>
-                    {eventId}
+        <div className="panel">
+          <div className="panel-title">Events</div>
+          <div className="event-select">
+            <select
+              value={selectedEvent}
+              onChange={(event) => {
+                const value = event.target.value;
+                setSelectedEvent(value);
+                if (pendingEventId && value !== pendingEventId) {
+                  setPendingEventId('');
+                  setPendingEventName('');
+                }
+              }}
+            >
+              <option value="">All events</option>
+              {events.map((event) => {
+                const label = event.event_name || event.name || event.event_id;
+                const status = event.status === 'ended' ? 'ended' : 'active';
+                return (
+                  <option key={event.event_id} value={event.event_id}>
+                    {label} ({status})
                   </option>
-                ))}
-              </select>
-              <div className="event-meta">{`${events.length} active`}</div>
+                );
+              })}
+            </select>
+            <div className="event-meta">
+              {events.length ? `${activeEventsCount} active` : 'No active events'}
             </div>
           </div>
-        ) : null}
+          <div className="event-create">
+            <input
+              type="text"
+              value={eventNameInput}
+              onChange={(event) => {
+                setEventNameInput(event.target.value);
+                if (eventCreateConflict) setEventCreateConflict(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  createEvent();
+                }
+              }}
+              placeholder="Event name"
+            />
+            <button className="btn" onClick={createEvent} type="button">
+              Create Event
+            </button>
+          </div>
+          {eventCreateConflict ? (
+            <div className="event-conflict">
+              <div>
+                <strong>Name exists:</strong>{' '}
+                {eventCreateConflict.existing?.event_name || eventCreateConflict.existing?.event_id}
+              </div>
+              {eventCreateConflict.suggested?.event_name ? (
+                <div>
+                  <strong>Suggested:</strong> {eventCreateConflict.suggested.event_name}
+                </div>
+              ) : null}
+              <div className="event-conflict-actions">
+                <button className="btn ghost small" type="button" onClick={useExistingEvent}>
+                  Use existing
+                </button>
+                {eventCreateConflict.suggested?.event_name ? (
+                  <button className="btn ghost small" type="button" onClick={useSuggestedEventName}>
+                    Use suggested
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          <div className="event-actions">
+            <button
+              className="btn ghost"
+              onClick={endEvent}
+              type="button"
+              disabled={!selectedEvent || selectedEventDetail?.status === 'ended'}
+            >
+              End Event
+            </button>
+          </div>
+          {selectedEvent ? (
+            <>
+              <div className="event-details">
+                <div className="event-row">
+                  <strong>Name:</strong> {eventLabelForId(selectedEvent) || selectedEvent}
+                </div>
+                <div className="event-row">
+                  <strong>ID:</strong> {selectedEvent}
+                </div>
+                <div className="event-row">
+                  <strong>Status:</strong>{' '}
+                  {selectedEventDetail?.status ||
+                    (pendingEventId === selectedEvent ? 'pending' : 'active')}
+                </div>
+                {selectedEventDetail?.started_at || selectedEventDetail?.created_at ? (
+                  <div className="event-row">
+                    <strong>Started:</strong>{' '}
+                    {formatEventTimestamp(
+                      selectedEventDetail?.started_at || selectedEventDetail?.created_at
+                    )}
+                  </div>
+                ) : null}
+                {selectedEventDetail?.count !== undefined ? (
+                  <div className="event-row">
+                    <strong>Systems:</strong> {selectedEventDetail.count}
+                  </div>
+                ) : null}
+                <div className="event-row">
+                  <strong>Live nodes:</strong>{' '}
+                  {liveEventNodes.length ? liveEventNodes.join(', ') : 'None'}
+                </div>
+              </div>
+              <div className="event-node-add">
+                {pendingEventId === selectedEvent ? (
+                  <div className="event-prompt">
+                    Event created. Add your first node to start tracking.
+                  </div>
+                ) : null}
+                {availableNodes.length ? (
+                  <div className="event-node-list">
+                    {availableNodes.map((node) => (
+                      <label key={node.node_id} className="checkbox event-node-option">
+                        <input
+                          type="checkbox"
+                          checked={selectedNodeIds.includes(node.node_id)}
+                          onChange={() => toggleNodeSelection(node.node_id)}
+                        />
+                        <span>
+                          {node.system_id} · {node.node_id}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty">No alive nodes available.</div>
+                )}
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={addNodesToEvent}
+                  disabled={!selectedNodeIds.length}
+                >
+                  Add selected nodes
+                </button>
+              </div>
+              <div className="event-alias">
+                <div className="event-row">
+                  <strong>Merge temp event</strong>
+                </div>
+                <div className="event-alias-inputs">
+                  <input
+                    type="text"
+                    value={aliasNodeInput}
+                    onChange={(event) => setAliasNodeInput(event.target.value)}
+                    placeholder="node_id"
+                  />
+                  <input
+                    type="text"
+                    value={aliasTempEventInput}
+                    onChange={(event) => setAliasTempEventInput(event.target.value)}
+                    placeholder="temp_event_id"
+                  />
+                  <button className="btn ghost" type="button" onClick={mergeTempEvent}>
+                    Merge
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </div>
 
         <div className="panel">
           <div className="panel-title">On Map</div>
@@ -1343,7 +1783,7 @@ export default function App() {
                     <div className="node-sub">{node.location || '--'}</div>
                     {groupEventId ? (
                       <div className="node-event">
-                        <span>Event: {groupEventId}</span>
+                        <span>Event: {eventLabelForId(groupEventId)}</span>
                         {!isLogger ? (
                           <span className="node-event-meta">{nodeEventLoggers.length} loggers</span>
                         ) : null}
@@ -1487,7 +1927,7 @@ export default function App() {
                     <div className="node-sub">{node.location || '--'}</div>
                     {groupEventId ? (
                       <div className="node-event">
-                        <span>Event: {groupEventId}</span>
+                        <span>Event: {eventLabelForId(groupEventId)}</span>
                         {!isLogger ? (
                           <span className="node-event-meta">{nodeEventLoggers.length} loggers</span>
                         ) : null}
@@ -1559,53 +1999,65 @@ export default function App() {
       <main className="map-wrap">
         <div className="report-filters">
           <label>
-            <span>Month</span>
-            <select
-              value={selectedReportMonth}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSelectedReportMonth(value);
-                if (value) setSelectedReportEvent('');
-              }}
-              disabled={Boolean(selectedReportEvent)}
-            >
-              <option value="">Select month</option>
-              {reportMonths.map((month) => (
-                <option key={month} value={month}>
-                  {formatMonthKey(month)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
             <span>Event</span>
             <select
               value={selectedReportEvent}
               onChange={(event) => {
                 const value = event.target.value;
                 setSelectedReportEvent(value);
-                if (value) setSelectedReportMonth('');
               }}
-              disabled={Boolean(selectedReportMonth)}
             >
               <option value="">Select event</option>
-              {reportEvents.map((entry) => (
-                <option key={entry.event_id} value={entry.event_id}>
-                  {entry.event_id}
-                </option>
-              ))}
+              {reportEvents.map((entry) => {
+                const label = entry.event_name || entry.name || entry.event_id;
+                const suffix = entry.report_nodes ? ` (${entry.report_nodes})` : '';
+                return (
+                  <option key={entry.event_id} value={entry.event_id}>
+                    {label}
+                    {suffix}
+                  </option>
+                );
+              })}
             </select>
           </label>
-          <div className="report-meta">
-            {reportMonths.length} months, {reportEvents.length} events
-          </div>
+          <div className="report-meta">{reportEvents.length} events with reports</div>
         </div>
         <div className="report-panel">
           <div className="report-panel-title">Reports</div>
+          {reportAggregate ? (
+            <div className="report-aggregate">
+              <div>
+                <div className="report-title">Aggregate event report</div>
+                <div className="report-sub">Combined view across all node uploads.</div>
+              </div>
+              <div className="report-actions">
+                {reportAggregate.report_html_url ? (
+                  <a
+                    className="link"
+                    href={reportAggregate.report_html_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open HTML
+                  </a>
+                ) : null}
+                {reportAggregate.report_json_url ? (
+                  <a
+                    className="link"
+                    href={reportAggregate.report_json_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Download JSON
+                  </a>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <div className="report-list">
             {reportMessage ? <div className="empty">{reportMessage}</div> : null}
             {!reportMessage && reportItems.length === 0 ? (
-              <div className="empty">Select a month or event to view reports.</div>
+              <div className="empty">Select an event to view reports.</div>
             ) : null}
             {reportItems.map((item) => (
               <div key={item.id} className="report-row">
@@ -1616,12 +2068,12 @@ export default function App() {
                 <div className="report-actions">
                   {item.reportUrl ? (
                     <a className="link" href={item.reportUrl} target="_blank" rel="noreferrer">
-                      Open
+                      Open HTML
                     </a>
                   ) : null}
                   {item.downloadUrl ? (
                     <a className="link" href={item.downloadUrl} target="_blank" rel="noreferrer">
-                      Download
+                      Download JSON
                     </a>
                   ) : null}
                 </div>
@@ -1634,16 +2086,18 @@ export default function App() {
             {['mapbox', 'esri'].map((provider) => {
               const label = mapProviders?.[provider]?.label || provider;
               const blocked = mapBlocked?.[provider];
-              const reason = blocked
-                ? `${guardrailPctLabel}% free tier reached for ${mapMonthLabel}`
-                : `Switch to ${label}`;
+              const reason = !satelliteAllowed
+                ? 'Satellite imagery disabled due to budget limits.'
+                : blocked
+                  ? `${guardrailPctLabel}% free tier reached for ${mapMonthLabel}`
+                  : `Switch to ${label}`;
               return (
                 <button
                   key={provider}
                   className={`map-provider-btn ${
                     activeProvider === provider ? 'active' : ''
                   } ${blocked ? 'blocked' : ''}`}
-                  disabled={blocked}
+                  disabled={blocked || !satelliteAllowed}
                   title={reason}
                   onClick={() => selectMapProvider(provider)}
                 >

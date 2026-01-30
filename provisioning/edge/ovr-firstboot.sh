@@ -2,14 +2,16 @@
 set -euo pipefail
 umask 027
 
-MARKER="/etc/overdrive/.firstboot_done"
-ENV_FILE="/etc/overdrive/firstboot.env"
-BOOTSTRAP_ARGS_FILE="/etc/overdrive/bootstrap.args"
-BOOTSTRAP_SCRIPT="/opt/stack/provisioning/edge/bootstrap_n100.sh"
-PACKAGE_LIST_FILE_DEFAULT="/opt/stack/provisioning/edge/firstboot-packages.txt"
+MARKER="/etc/ovr/.firstboot_done"
+ENV_FILE="/etc/ovr/firstboot.env"
+BOOTSTRAP_ARGS_FILE="/etc/ovr/bootstrap.args"
+BOOTSTRAP_SCRIPT="/opt/ovr/provisioning/edge/bootstrap_n100.sh"
+NM_BOOTSTRAP_SCRIPT="/opt/ovr/provisioning/edge/bootstrap_networkmanager.sh"
+PACKAGE_LIST_FILE_DEFAULT="/opt/ovr/provisioning/edge/firstboot-packages.txt"
 PACKAGE_LIST_FILE="${PACKAGE_LIST_FILE:-$PACKAGE_LIST_FILE_DEFAULT}"
-WIFI_PACKAGE_LIST_FILE_DEFAULT="/opt/stack/provisioning/edge/firstboot-packages-wifi.txt"
+WIFI_PACKAGE_LIST_FILE_DEFAULT="/opt/ovr/provisioning/edge/firstboot-packages-wifi.txt"
 WIFI_PACKAGE_LIST_FILE="${WIFI_PACKAGE_LIST_FILE:-$WIFI_PACKAGE_LIST_FILE_DEFAULT}"
+RUN_NM_BOOTSTRAP="${RUN_NM_BOOTSTRAP:-1}"
 RUN_PACKAGE_INSTALL="${RUN_PACKAGE_INSTALL:-1}"
 RUN_WIFI_SETUP="${RUN_WIFI_SETUP:-1}"
 APT_FORCE_IPV4="${APT_FORCE_IPV4:-0}"
@@ -945,9 +947,6 @@ run_bootstrap() {
     if [ -z "${NODE_ID:-}" ] && [ "$NONINTERACTIVE" -ne 1 ]; then
       read -r -p "Node ID: " NODE_ID
     fi
-    if [ -z "${SYSTEM_ID:-}" ] && [ "$NONINTERACTIVE" -ne 1 ]; then
-      read -r -p "System ID (blank to use Node ID): " SYSTEM_ID
-    fi
     if [ -n "${DEPLOYMENT_ID:-}" ]; then
       args+=(--deployment-id "$DEPLOYMENT_ID")
     fi
@@ -993,24 +992,6 @@ run_bootstrap() {
     if [ -n "${EVENT_API_KEY_FILE:-}" ]; then
       args+=(--event-api-key-file "$EVENT_API_KEY_FILE")
     fi
-    if [ -n "${HAS_GX:-}" ]; then
-      args+=(--has-gx "$HAS_GX")
-    fi
-    if [ -n "${GX_HOST:-}" ]; then
-      args+=(--gx-host "$GX_HOST")
-    fi
-    if [ -n "${GX_PORT:-}" ]; then
-      args+=(--gx-port "$GX_PORT")
-    fi
-    if [ -n "${GX_USER:-}" ]; then
-      args+=(--gx-user "$GX_USER")
-    fi
-    if [ -n "${GX_PASSWORD:-}" ]; then
-      args+=(--gx-password "$GX_PASSWORD")
-    fi
-    if [ -n "${GX_PASSWORD_FILE:-}" ]; then
-      args+=(--gx-password-file "$GX_PASSWORD_FILE")
-    fi
   fi
 
   if [ ! -x "$BOOTSTRAP_SCRIPT" ]; then
@@ -1023,12 +1004,20 @@ run_bootstrap() {
     return 0
   fi
 
-  "$BOOTSTRAP_SCRIPT" "${args[@]}"
+  /usr/bin/bash "$BOOTSTRAP_SCRIPT" "${args[@]}"
 }
 
 main() {
   resize_tty
   preflight_network
+
+  if [ "${RUN_NM_BOOTSTRAP:-1}" = "1" ]; then
+    if [ -x "$NM_BOOTSTRAP_SCRIPT" ]; then
+      /usr/bin/bash "$NM_BOOTSTRAP_SCRIPT"
+    else
+      say "NetworkManager bootstrap script not found: $NM_BOOTSTRAP_SCRIPT"
+    fi
+  fi
 
   if [ "${RUN_WIFI_SETUP:-1}" = "1" ]; then
     ensure_nonfree_firmware_sources
@@ -1075,7 +1064,7 @@ main() {
     run_bootstrap
   fi
 
-  mkdir -p /etc/overdrive
+  mkdir -p /etc/ovr
   touch "$MARKER"
 }
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 027
 
-ENV_FILE_DEFAULT="/etc/overdrive/firstboot.env"
+ENV_FILE_DEFAULT="/etc/ovr/firstboot.env"
 ENV_FILE="${ENV_FILE:-$ENV_FILE_DEFAULT}"
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASS="${WIFI_PASS:-}"
@@ -149,7 +149,7 @@ main() {
 
   if ! command -v nmcli >/dev/null 2>&1; then
     echo "ERROR: nmcli not found. Install NetworkManager first." >&2
-    echo "Hint: sudo bash /opt/stack/provisioning/edge/install-packages.sh" >&2
+    echo "Hint: sudo bash /opt/ovr/provisioning/edge/install-packages.sh" >&2
     exit 1
   fi
 

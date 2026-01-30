@@ -7,7 +7,7 @@ This is a short, on-site checklist for provisioning a new node.
 USB root should contain:
 - `preseed.cfg`
 - `OVR_Telemetry_Stack/` (this repo)
-- optional: `overdrive/firstboot.env`, `overdrive/bootstrap.args`, `overdrive/secrets/*`
+- optional: `ovr/firstboot.env`, `ovr/bootstrap.args`, `ovr/secrets/*`
 
 ## 1) First boot (no automation)
 
@@ -16,13 +16,13 @@ Log in, then get internet working.
 ### Option A: single-port quick internet (recommended for first boot)
 
 ```
-sudo bash /opt/stack/provisioning/edge/bringup-network.sh --iface <iface> --mode dhcp
+sudo bash /opt/ovr/provisioning/edge/bringup-network.sh --iface <iface> --mode dhcp
 ```
 
 Static example:
 
 ```
-sudo bash /opt/stack/provisioning/edge/bringup-network.sh --iface <iface> --mode static \
+sudo bash /opt/ovr/provisioning/edge/bringup-network.sh --iface <iface> --mode static \
   --ip 192.168.1.10/24 --gw 192.168.1.1 --dns "1.1.1.1,8.8.8.8"
 ```
 
@@ -45,22 +45,22 @@ If you must wire multiple ports:
 ## 2) Install packages
 
 ```
-sudo bash /opt/stack/provisioning/edge/install-packages.sh
+sudo bash /opt/ovr/provisioning/edge/install-packages.sh
 ```
 
-This will also attempt WiFi setup **only if** `WIFI_SSID` is configured (either via `/etc/overdrive/firstboot.env` or by exporting `WIFI_SSID`/`WIFI_PASS` before running the script).
+This will also attempt WiFi setup **only if** `WIFI_SSID` is configured (either via `/etc/ovr/firstboot.env` or by exporting `WIFI_SSID`/`WIFI_PASS` before running the script).
 
 ## 3) WiFi change (optional)
 
 ```
-sudo bash /opt/stack/provisioning/edge/setup-wifi.sh --ssid "SSID" --pass "PASSWORD"
+sudo bash /opt/ovr/provisioning/edge/setup-wifi.sh --ssid "SSID" --pass "PASSWORD"
 ```
 
-If `/etc/overdrive/firstboot.env` already has `WIFI_SSID` / `WIFI_PASS`,
+If `/etc/ovr/firstboot.env` already has `WIFI_SSID` / `WIFI_PASS`,
 you can run without args:
 
 ```
-sudo bash /opt/stack/provisioning/edge/setup-wifi.sh
+sudo bash /opt/ovr/provisioning/edge/setup-wifi.sh
 ```
 
 ## 4) Multi-port roles (GX + WAN + Modbus)
@@ -68,14 +68,14 @@ sudo bash /opt/stack/provisioning/edge/setup-wifi.sh
 Edit per-node settings:
 
 ```
-sudo vim /opt/edge/networking/ovru-netkit/vars.env
+sudo vim /opt/ovr/edge/networking/ovru-netkit/vars.env
 ```
 
 Then apply:
 
 ```
-sudo bash /opt/edge/networking/ovru-netkit/configure-ports.sh
-sudo bash /opt/edge/networking/ovru-netkit/verify.sh
+sudo bash /opt/ovr/edge/networking/ovru-netkit/configure-ports.sh
+sudo bash /opt/ovr/edge/networking/ovru-netkit/verify.sh
 ```
 
 Notes:
@@ -87,7 +87,7 @@ Notes:
 Run from repo root:
 
 ```
-cd /opt/stack
+cd /opt/ovr
 sudo bash provisioning/edge/bootstrap_n100.sh --deployment-id <fleet> --node-id <node>
 ```
 
@@ -138,15 +138,15 @@ Targets (optional, override defaults):
 ### Bootstrap args via file (recommended)
 
 You can avoid typing by using:
-- `/etc/overdrive/bootstrap.args` (one arg per line)
-- `/etc/overdrive/firstboot.env` (shared defaults)
-- `/etc/overdrive/secrets/*` for passwords
+- `/etc/ovr/bootstrap.args` (one arg per line)
+- `/etc/ovr/firstboot.env` (shared defaults)
+- `/etc/ovr/secrets/*` for passwords
 
 If using multi-port roles with `edge/networking/ovru-netkit`, avoid `--lan-*`/`--wifi-*` flags.
 
 ## 6) Final check
 
 ```
-cd /opt/stack
+cd /opt/ovr
 sudo docker compose up -d
 ```

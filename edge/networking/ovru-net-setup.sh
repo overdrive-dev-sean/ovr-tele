@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED: use edge/networking/ovru-netkit/configure-ports.sh instead.
+
 ### === EDIT THESE ===
 LAN_IF="enp3s0"              # port to GX / laptop
 WAN_IF="enp2s0"              # port to internet router (DHCP client)
 WIFI_CON_NAME="wan-wifi"     # NetworkManager wifi connection profile name
 ### ==================
 
-LAN_IP_CIDR="192.168.100.1/30"
-LAN_SUBNET="192.168.100.0/30"
-LAN_CLIENT_IP="192.168.100.2"
-LAN_NETMASK="255.255.255.252"
+LAN_IP_CIDR="192.168.100.1/24"
+LAN_SUBNET="192.168.100.0/24"
+LAN_CLIENT_IP="192.168.100.50"
+LAN_NETMASK="255.255.255.0"
 
 echo "== Installing packages =="
 apt-get update

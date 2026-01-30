@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Load site identity labels (deployment/node/system ids, etc)
+# Load edge identity labels (deployment/node/system ids, etc)
 set -a
-[ -f /etc/ovr/site.env ] && . /etc/ovr/site.env
+[ -f /etc/ovr/edge.env ] && . /etc/ovr/edge.env
+[ -f /etc/ovr/edge.env ] && . /etc/ovr/edge.env
 set +a
 
 SCRAPE_CONFIG="${VMAGENT_SCRAPE_CONFIG:-/etc/vmagent/scrape.yml}"

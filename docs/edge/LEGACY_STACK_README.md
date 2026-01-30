@@ -15,7 +15,7 @@ Industrial telemetry stack for off-grid renewable energy systems. Collects metri
 
 ### Deploy Stack
 ```bash
-cd /opt/stack  # or wherever you cloned this repo
+cd /opt/ovr  # or wherever you cloned this repo
 sudo docker-compose pull
 sudo docker-compose up -d
 ```
@@ -28,7 +28,7 @@ sudo docker-compose up -d
 
 Example:
 ```bash
-cd /opt/stack
+cd /opt/ovr
 cp edge.env.example edge.env
 # edit EDGE_VERSION + (optionally) pin dependency image tags
 sudo docker compose --env-file edge.env -f docker-compose.release.yml pull
@@ -179,7 +179,7 @@ ls -lh /var/lib/docker/containers/*/*-json.log
 
 **Note**: Existing containers continue using old log settings. Recreate to apply new limits:
 ```bash
-cd /opt/stack
+cd /opt/ovr
 sudo docker-compose up -d --force-recreate
 ```
 
@@ -475,7 +475,7 @@ Notes are stored in SQLite (`audit_log`) and surfaced in the web UI via `/api/no
 Already included in `docker-compose.yml`:
 
 ```bash
-cd /opt/stack
+cd /opt/ovr
 sudo docker-compose build event-service
 sudo docker-compose up -d event-service
 ```
@@ -621,7 +621,7 @@ Monitoring:
   - `sum(map_tiles_month_total{provider="esri"})`
 
 Ensure vmagent scrapes the event-service `/metrics` endpoint and remote_write relabeling does not drop
-`map_tiles_month_*` series (update `/etc/overdrive/targets.yml` and your relabel configs if needed).
+`map_tiles_month_*` series (update `/etc/ovr/targets.yml` and your relabel configs if needed).
 
 ### Grafana Visualization
 

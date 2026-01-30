@@ -1,0 +1,40 @@
+# GX device hostnames (mDNS .local names, one per line)
+# Format: hostname without .local suffix
+
+# Cerbo GX Pro 6005 series
+pro6005-1
+pro6005-2
+
+# Cerbo GX Pro 6010 series
+pro6010-1
+pro6010-2
+pro6010-3
+
+# Cerbo GX Pro 605 series
+pro605-1
+pro605-2
+pro605-3
+pro605-4
+pro605-5
+pro605-6
+
+# Cerbo GX Pro 610 series
+pro610-1
+
+# Cerbo GX Pro 615 series
+pro615-1
+
+# Cerbo GX Pro 3x series
+pro3x-1
+pro3x-2
+pro3x-3
+pro3x-4
+pro3x-5
+pro3x-6
+pro3x-7
+pro3x-8
+pro3x-9
+pro3x-10
+pro3x-11
+pro3x-12
+pro3x-13

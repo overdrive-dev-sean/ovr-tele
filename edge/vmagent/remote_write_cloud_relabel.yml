@@ -1,4 +1,4 @@
 # Keep only downsampled series + (optionally) a few raw “state” metrics.
 - action: keep
   source_labels: [__name__]
-  regex: 'ovr_event_active|.*:10s_avg$'
+  regex: '^((ovr_event_active)|(map_tiles_month_total)|(map_tiles_year_total)|.*:10s_avg)$'

@@ -35,6 +35,17 @@ def init_map_tables(conn) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS map_tile_sync (
+            month_key TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            sent_total INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (month_key, provider)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS map_provider_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -69,6 +80,33 @@ def get_tile_counts(conn, month_key: str) -> Dict[str, int]:
         if provider in counts:
             counts[provider] = int(row["count"] or 0)
     return counts
+
+
+def get_tile_sync_totals(conn, month_key: str) -> Dict[str, int]:
+    rows = conn.execute(
+        "SELECT provider, sent_total FROM map_tile_sync WHERE month_key = ?",
+        (month_key,),
+    ).fetchall()
+    totals = {provider: 0 for provider in PROVIDERS}
+    for row in rows:
+        provider = row["provider"]
+        if provider in totals:
+            totals[provider] = int(row["sent_total"] or 0)
+    return totals
+
+
+def set_tile_sync_total(conn, month_key: str, provider: str, total: int) -> None:
+    now = int(time.time())
+    conn.execute(
+        """
+        INSERT INTO map_tile_sync (month_key, provider, sent_total, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(month_key, provider) DO UPDATE SET
+            sent_total = excluded.sent_total,
+            updated_at = excluded.updated_at
+        """,
+        (month_key, provider, total, now),
+    )
 
 
 def set_preferred_provider(conn, provider: str) -> None:

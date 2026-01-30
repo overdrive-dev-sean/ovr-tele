@@ -25,11 +25,13 @@ Create DNS records pointing to the VPS public IP:
 
 ## Environment
 
-Copy and edit the example:
+Copy and edit the example (canonical location is `/etc/ovr/cloud.env`):
 
 ```bash
 cd cloud
-cp .env.example .env
+sudo mkdir -p /etc/ovr
+sudo cp .env.example /etc/ovr/cloud.env
+sudo ln -sf /etc/ovr/cloud.env .env
 ```
 
 Set at minimum:
@@ -43,7 +45,7 @@ Set at minimum:
 
 ```bash
 cd cloud
-sudo docker compose -f compose.dev.yml --env-file .env up -d --build
+sudo docker compose -f compose.dev.yml up -d --build
 ```
 
 ## Start (production/release)
@@ -52,8 +54,8 @@ sudo docker compose -f compose.dev.yml --env-file .env up -d --build
 cd cloud
 # set GHCR_OWNER + CLOUD_TAG in .env
 # pin VM_IMAGE and GRAFANA_IMAGE (no :latest)
-sudo docker compose -f compose.release.yml --env-file .env pull
-sudo docker compose -f compose.release.yml --env-file .env up -d
+sudo docker compose -f compose.release.yml pull
+sudo docker compose -f compose.release.yml up -d
 
 ```
 
@@ -63,10 +65,10 @@ This is the safest way to test a new repo on the same VPS **without** touching t
 
 ```bash
 cd cloud
-cp .env.example .env
+# .env should already be linked to /etc/ovr/cloud.env
 # set SANDBOX_BIND=0.0.0.0 if you want a remote edge node to reach the sandbox ports.
 COMPOSE_PROJECT_NAME=cloud_sandbox \
-  sudo docker compose -f compose.sandbox.yml --env-file .env up -d
+  sudo docker compose -f compose.sandbox.yml up -d
 ```
 
 Exposed ports (host):

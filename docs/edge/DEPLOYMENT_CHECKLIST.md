@@ -15,7 +15,7 @@ Quick reference for deploying the Event + Location Marker system.
 ### 1. Deploy Event Service Container
 
 ```bash
-cd /opt/edge  # or your repo location
+cd /opt/ovr/edge  # or your repo location
 
 # Dev/local (build on the node)
 sudo docker compose -f compose.dev.yml up -d --build events
@@ -241,7 +241,7 @@ curl 'http://localhost:8428/api/v1/query?query=ovr_event_active'
 
 If needed, stop event service:
 ```bash
-cd /opt/edge && sudo docker compose -f compose.dev.yml stop events
+cd /opt/ovr/edge && sudo docker compose -f compose.dev.yml stop events
 ```
 
 Remove cloudflared ingress rule and restart:
