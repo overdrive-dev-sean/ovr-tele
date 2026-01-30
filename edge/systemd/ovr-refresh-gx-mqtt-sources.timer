@@ -1,10 +1,10 @@
 [Unit]
-Description=Refresh GX MQTT sources every 60 seconds
+Description=Refresh GX MQTT sources and send keepalives every 50 seconds
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=60s
-AccuracySec=10s
+OnBootSec=10s
+OnUnitActiveSec=50s
+AccuracySec=5s
 Unit=ovr-refresh-gx-mqtt-sources.service
 
 [Install]
