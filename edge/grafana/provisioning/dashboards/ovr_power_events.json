@@ -139,17 +139,17 @@
       },
       "targets": [
         {
-          "expr": "victron_ac_in_power{system_id=\"$system_id\"}",
+          "expr": "victron_system_ac_activein_power_value{system_id=\"$system_id\"} or victron_vebus_ac_activein_p_value{system_id=\"$system_id\"}",
           "legendFormat": "AC In",
           "refId": "A"
         },
         {
-          "expr": "victron_ac_out_power{system_id=\"$system_id\"}",
+          "expr": "victron_vebus_ac_out_p_value{system_id=\"$system_id\"}",
           "legendFormat": "AC Out",
           "refId": "B"
         },
         {
-          "expr": "victron_dc_power{system_id=\"$system_id\"}",
+          "expr": "victron_vebus_dc_0_power_value{system_id=\"$system_id\"} or victron_system_dc_battery_power_value{system_id=\"$system_id\"}",
           "legendFormat": "DC",
           "refId": "C"
         },
@@ -188,7 +188,7 @@
       },
       "targets": [
         {
-          "expr": "victron_ac_out_power{system_id=\"$system_id\"} * on(system_id) group_left(event_id) (ovr_event_active{system_id=\"$system_id\",event_id=~\"$event_id\"} == 1)",
+          "expr": "(victron_vebus_ac_out_p_value{system_id=\"$system_id\"}) * on(system_id) group_left(event_id) (ovr_event_active{system_id=\"$system_id\",event_id=~\"$event_id\"} == 1)",
           "legendFormat": "{{event_id}}",
           "refId": "A"
         }
@@ -222,7 +222,7 @@
       },
       "targets": [
         {
-          "expr": "sum(acuvim_P{device=~\"$acuvim_device\"}) - victron_ac_out_power{system_id=\"$system_id\"}",
+          "expr": "sum(acuvim_P{device=~\"$acuvim_device\"}) - (victron_vebus_ac_out_p_value{system_id=\"$system_id\"})",
           "legendFormat": "Delta",
           "refId": "A"
         }
@@ -256,7 +256,7 @@
       },
       "targets": [
         {
-          "expr": "100 * victron_ac_out_power{system_id=\"$system_id\"} / clamp_min(abs(victron_dc_power{system_id=\"$system_id\"}), 1)",
+          "expr": "100 * (victron_vebus_ac_out_p_value{system_id=\"$system_id\"}) / clamp_min(abs(victron_vebus_dc_0_power_value{system_id=\"$system_id\"} or victron_system_dc_battery_power_value{system_id=\"$system_id\"}), 1)",
           "legendFormat": "Efficiency",
           "refId": "A"
         }
@@ -290,7 +290,7 @@
       },
       "targets": [
         {
-          "expr": "100 * victron_ac_out_power{system_id=\"$system_id\"} / clamp_min(victron_ac_out_apparent{system_id=\"$system_id\"}, 1)",
+          "expr": "100 * (victron_vebus_ac_out_p_value{system_id=\"$system_id\"}) / clamp_min(victron_vebus_ac_out_s_value{system_id=\"$system_id\"}, 1)",
           "legendFormat": "Victron PF",
           "refId": "A"
         },
@@ -329,7 +329,7 @@
       },
       "targets": [
         {
-          "expr": "100 * (max(victron_ac_out_l1_i{system_id=\"$system_id\"} or victron_ac_out_l2_i{system_id=\"$system_id\"} or victron_ac_out_l3_i{system_id=\"$system_id\"}) - min(victron_ac_out_l1_i{system_id=\"$system_id\"} or victron_ac_out_l2_i{system_id=\"$system_id\"} or victron_ac_out_l3_i{system_id=\"$system_id\"})) / clamp_min(max(victron_ac_out_l1_i{system_id=\"$system_id\"} or victron_ac_out_l2_i{system_id=\"$system_id\"} or victron_ac_out_l3_i{system_id=\"$system_id\"}), 0.1)",
+          "expr": "100 * (max(victron_vebus_devices_0_ac_out_p_value{system_id=\"$system_id\"} or victron_vebus_devices_1_ac_out_p_value{system_id=\"$system_id\"} or victron_vebus_devices_2_ac_out_p_value{system_id=\"$system_id\"}) - min(victron_vebus_devices_0_ac_out_p_value{system_id=\"$system_id\"} or victron_vebus_devices_1_ac_out_p_value{system_id=\"$system_id\"} or victron_vebus_devices_2_ac_out_p_value{system_id=\"$system_id\"})) / clamp_min(max(victron_vebus_devices_0_ac_out_p_value{system_id=\"$system_id\"} or victron_vebus_devices_1_ac_out_p_value{system_id=\"$system_id\"} or victron_vebus_devices_2_ac_out_p_value{system_id=\"$system_id\"}), 0.1)",
           "legendFormat": "Imbalance",
           "refId": "A"
         }
@@ -363,22 +363,22 @@
       },
       "targets": [
         {
-          "expr": "victron_ac_out_l1_p{system_id=\"$system_id\"}",
-          "legendFormat": "L1",
+          "expr": "victron_vebus_devices_0_ac_out_p_value{system_id=\"$system_id\"}",
+          "legendFormat": "Device 0 (L1)",
           "refId": "A"
         },
         {
-          "expr": "victron_ac_out_l2_p{system_id=\"$system_id\"}",
-          "legendFormat": "L2",
+          "expr": "victron_vebus_devices_1_ac_out_p_value{system_id=\"$system_id\"}",
+          "legendFormat": "Device 1 (L2)",
           "refId": "B"
         },
         {
-          "expr": "victron_ac_out_l3_p{system_id=\"$system_id\"}",
-          "legendFormat": "L3",
+          "expr": "victron_vebus_devices_2_ac_out_p_value{system_id=\"$system_id\"}",
+          "legendFormat": "Device 2 (L3)",
           "refId": "C"
         }
       ],
-      "title": "AC Out Power by Phase",
+      "title": "AC Out Power by Device",
       "type": "timeseries"
     },
     {
@@ -407,22 +407,12 @@
       },
       "targets": [
         {
-          "expr": "victron_ac_out_l1_v{system_id=\"$system_id\"}",
-          "legendFormat": "L1",
+          "expr": "victron_vebus_ac_out_v_value{system_id=\"$system_id\"}",
+          "legendFormat": "AC Out Voltage",
           "refId": "A"
-        },
-        {
-          "expr": "victron_ac_out_l2_v{system_id=\"$system_id\"}",
-          "legendFormat": "L2",
-          "refId": "B"
-        },
-        {
-          "expr": "victron_ac_out_l3_v{system_id=\"$system_id\"}",
-          "legendFormat": "L3",
-          "refId": "C"
         }
       ],
-      "title": "AC Out Voltage (L1-L3)",
+      "title": "AC Out Voltage",
       "type": "timeseries"
     },
     {
@@ -451,22 +441,12 @@
       },
       "targets": [
         {
-          "expr": "victron_ac_out_l1_i{system_id=\"$system_id\"}",
-          "legendFormat": "L1",
+          "expr": "victron_vebus_ac_out_i_value{system_id=\"$system_id\"}",
+          "legendFormat": "AC Out Current",
           "refId": "A"
-        },
-        {
-          "expr": "victron_ac_out_l2_i{system_id=\"$system_id\"}",
-          "legendFormat": "L2",
-          "refId": "B"
-        },
-        {
-          "expr": "victron_ac_out_l3_i{system_id=\"$system_id\"}",
-          "legendFormat": "L3",
-          "refId": "C"
         }
       ],
-      "title": "AC Out Current (L1-L3)",
+      "title": "AC Out Current",
       "type": "timeseries"
     },
     {
@@ -622,22 +602,22 @@
       },
       "targets": [
         {
-          "expr": "victron_energy_ac_in1_to_ac_out{system_id=\"$system_id\"}",
+          "expr": "victron_vebus_energy_acin1toacout_value{system_id=\"$system_id\"}",
           "legendFormat": "AC In1 -> AC Out",
           "refId": "A"
         },
         {
-          "expr": "victron_energy_inverter_to_ac_out{system_id=\"$system_id\"}",
+          "expr": "victron_vebus_energy_invertertoacout_value{system_id=\"$system_id\"}",
           "legendFormat": "Inverter -> AC Out",
           "refId": "B"
         },
         {
-          "expr": "victron_energy_out_to_inverter{system_id=\"$system_id\"}",
+          "expr": "victron_vebus_energy_outtoinverter_value{system_id=\"$system_id\"}",
           "legendFormat": "AC Out -> Inverter",
           "refId": "C"
         },
         {
-          "expr": "victron_energy_inverter_to_ac_in1{system_id=\"$system_id\"}",
+          "expr": "victron_vebus_energy_invertertoacin1_value{system_id=\"$system_id\"}",
           "legendFormat": "Inverter -> AC In1",
           "refId": "D"
         }
@@ -672,7 +652,7 @@
         "datasource": "$ds",
         "label": "System",
         "name": "system_id",
-        "query": "label_values(victron_ac_out_power, system_id)",
+        "query": "label_values(victron_vebus_ac_out_p_value, system_id)",
         "refresh": 1,
         "type": "query"
       },
