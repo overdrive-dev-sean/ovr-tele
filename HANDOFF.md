@@ -242,8 +242,49 @@ When working in tandem:
 *Update this section as you work*
 
 ### Edge Claude
-- **Working on:** Bidirectional MQTT sync complete ✓
+- **Working on:** Fix `ovr_event_active` remote_write to cloud
 - **Blocked by:** (nothing)
+- **Priority task:**
+
+  **ISSUE: `ovr_event_active` metric not reaching cloud VM**
+
+  The events service writes `ovr_event_active` directly to local VictoriaMetrics via `/write` (Influx line protocol). This bypasses vmagent entirely, so it never gets remote_written to cloud. As a result, the "Join active event" dropdown on the fleet map is empty.
+
+  **The metric exists locally:**
+  ```bash
+  curl -s 'http://localhost:8428/api/v1/query?query=ovr_event_active' | jq .
+  # Returns: ovr_event_active{deployment_id="OverdriveFleet", event_id="BH\ test", location="heater", node_id="node-04", system_id="pro6005-2"}
+  ```
+
+  **Fix:** Add a federate job to `/etc/ovr/vmagent.scrape.yml` so vmagent picks up `ovr_event_active` from local VM and remote_writes it to cloud:
+
+  ```yaml
+  # Add this job to vmagent.scrape.yml (after vm_federate_victron)
+  - job_name: vm_federate_events
+    scrape_interval: 10s
+    metrics_path: /federate
+    params:
+      match[]:
+        - '{__name__=~"ovr_event_active"}'
+    static_configs:
+      - targets:
+          - "localhost:8428"
+  ```
+
+  Then restart vmagent:
+  ```bash
+  docker restart vmagent
+  ```
+
+  The relabel config (`/etc/ovr/remote_write_cloud_relabel.yml`) already keeps `ovr_event_active`:
+  ```yaml
+  regex: '^((ovr_event_active)|(map_tiles_month_total)|(map_tiles_year_total)|.*:10s_avg)$'
+  ```
+
+  **Also fix:** `/etc/ovr/targets.yml` is a directory instead of a file - causing scrape errors every minute. Either:
+  - Remove the directory and create a proper file, OR
+  - Update `vmagent.scrape.yml` to point to `/etc/ovr/targets.yml/targets.yml.example` (or create proper targets file)
+
 - **Notes:**
   - ✅ Victron federation working (1609 samples/scrape)
   - ✅ Stream aggregation producing :10s_avg metrics

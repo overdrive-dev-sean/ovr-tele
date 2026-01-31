@@ -679,10 +679,54 @@ export default function App() {
     return false;
   };
 
+  // Helper to check if realtime data is fresh (< 30s old)
+  const isRealtimeFresh = useCallback((nodeId) => {
+    const nodeData = realtimeData[nodeId];
+    if (!nodeData || !nodeData.receivedAt) return false;
+    return Date.now() - nodeData.receivedAt < 30000;
+  }, [realtimeData]);
+
+  // Enrich a node with realtime data if available
+  const enrichNodeWithRealtime = useCallback((node) => {
+    if (!node.node_id) return node;
+    const nodeData = realtimeData[node.node_id];
+    const isFresh = isRealtimeFresh(node.node_id);
+    if (!nodeData || !isFresh) return node;
+
+    // Get system-level data if available
+    const rt = nodeData.systems?.find((s) => s.system_id === node.system_id) || null;
+
+    // Merge node-level data (event_id) and system-level data
+    return {
+      ...node,
+      // Node-level from realtime
+      event_id: nodeData.event_id ?? node.event_id,
+      event_updated_at: nodeData.ts ? nodeData.ts / 1000 : node.event_updated_at,
+      // System-level from realtime (if found)
+      ...(rt && {
+        soc: rt.soc ?? node.soc,
+        voltage: rt.voltage ?? node.voltage,
+        pin: rt.pin ?? node.pin,
+        pout: rt.pout ?? node.pout,
+        mode: rt.mode ?? node.mode,
+      }),
+      _realtime: true,
+      _realtimeTs: nodeData.ts,
+    };
+  }, [realtimeData, isRealtimeFresh]);
+
+  // Enrich ALL nodes with realtime data first (including event_id from MQTT)
+  const enrichedNodes = useMemo(
+    () => nodes.map(enrichNodeWithRealtime),
+    [nodes, enrichNodeWithRealtime]
+  );
+
+  // Filter by event AFTER enrichment (so MQTT event_id is available)
   const filteredNodes = useMemo(() => {
-    if (!selectedEvent) return nodes;
-    return nodes.filter((node) => node.event_id === selectedEvent);
-  }, [nodes, selectedEvent]);
+    if (!selectedEvent) return enrichedNodes;
+    return enrichedNodes.filter((node) => node.event_id === selectedEvent);
+  }, [enrichedNodes, selectedEvent]);
+
   const visibleNodes = useMemo(
     () => filteredNodes.filter(hasFreshSignal),
     [filteredNodes]
@@ -695,45 +739,18 @@ export default function App() {
     return nodeData.systems.find((s) => s.system_id === systemId) || null;
   }, [realtimeData]);
 
-  // Helper to check if realtime data is fresh (< 30s old)
-  const isRealtimeFresh = useCallback((nodeId) => {
-    const nodeData = realtimeData[nodeId];
-    if (!nodeData || !nodeData.receivedAt) return false;
-    return Date.now() - nodeData.receivedAt < 30000;
-  }, [realtimeData]);
-
-  // Enrich a node with realtime data if available
-  const enrichNodeWithRealtime = useCallback((node) => {
-    if (!node.node_id) return node;
-    const rt = getRealtimeForSystem(node.node_id, node.system_id);
-    if (!rt || !isRealtimeFresh(node.node_id)) return node;
-    return {
-      ...node,
-      soc: rt.soc ?? node.soc,
-      voltage: rt.voltage ?? node.voltage,
-      pin: rt.pin ?? node.pin,
-      pout: rt.pout ?? node.pout,
-      mode: rt.mode ?? node.mode,
-      _realtime: true,
-      _realtimeTs: rt.ts,
-    };
-  }, [getRealtimeForSystem, isRealtimeFresh]);
-
-  // Enriched nodes with realtime data
-  const enrichedVisibleNodes = useMemo(
-    () => visibleNodes.map(enrichNodeWithRealtime),
-    [visibleNodes, enrichNodeWithRealtime]
-  );
+  // Visible nodes are already enriched from the enrichedNodes -> filteredNodes -> visibleNodes chain
+  const enrichedVisibleNodes = visibleNodes;
   const liveEventNodes = useMemo(() => {
     if (!selectedEvent) return [];
     const ids = new Set();
-    nodes.forEach((node) => {
+    enrichedNodes.forEach((node) => {
       if (node.event_id === selectedEvent && node.node_id) {
         ids.add(node.node_id);
       }
     });
     return [...ids];
-  }, [nodes, selectedEvent]);
+  }, [enrichedNodes, selectedEvent]);
   const eventNodeEntries = useMemo(() => {
     const entries = Array.isArray(selectedEventDetail?.nodes)
       ? selectedEventDetail.nodes
