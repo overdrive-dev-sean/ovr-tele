@@ -99,8 +99,7 @@ services:
     container_name: events
     depends_on:
       - victoria-metrics
-    ports:
-      - "127.0.0.1:8088:8088"
+    network_mode: host
     volumes:
       - event_data:/data
       - /etc/ovr/secrets:/etc/ovr/secrets:ro
@@ -110,6 +109,8 @@ services:
     environment:
       - DB_PATH=/data/events.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Override for host networking - can't resolve docker service names
+      - VM_QUERY_URL=http://localhost:8428
     restart: unless-stopped
 
   frontend:
