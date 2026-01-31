@@ -487,10 +487,24 @@ export default function App() {
 
   const loadDashboard = async () => {
     try {
-      const data = await getJson('/dashboard');
-      setDashboardSystems(data.systems || []);
+      // Use realtime MQTT-cached endpoint for faster updates
+      const data = await getJson('/realtime');
+      const systems = (data.systems || []).map((sys) => ({
+        ...sys,
+        // Mark stale systems for UI indication
+        alerts: sys.stale ? ['Data stale'] : [],
+        alerts_count: sys.stale ? 1 : 0
+      }));
+      setDashboardSystems(systems);
     } catch (err) {
       console.warn('Failed to load dashboard:', err);
+      // Fallback to traditional dashboard endpoint if realtime fails
+      try {
+        const fallback = await getJson('/dashboard');
+        setDashboardSystems(fallback.systems || []);
+      } catch (fallbackErr) {
+        console.warn('Fallback dashboard also failed:', fallbackErr);
+      }
     }
   };
 
@@ -948,7 +962,8 @@ export default function App() {
 
     const fastTimer = setInterval(loadSummary, 1000);
     const slowTimer = setInterval(loadSummary, 10000);
-    const dashboardTimer = setInterval(loadDashboard, 2000);
+    // Realtime endpoint is MQTT-cached, so we can poll faster (1s vs 2s)
+    const dashboardTimer = setInterval(loadDashboard, 1000);
 
     return () => {
       clearInterval(fastTimer);
