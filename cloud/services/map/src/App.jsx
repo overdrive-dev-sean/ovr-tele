@@ -43,6 +43,31 @@ const escapeHtml = (value) =>
     .replace(/\"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
+const parseJson = async (resp) => {
+  try {
+    return await resp.json();
+  } catch (err) {
+    return null;
+  }
+};
+
+const apiPost = async (url, body) => {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const payload = await parseJson(resp);
+  if (!resp.ok) {
+    const msg = payload?.error || payload?.message || `${resp.status} ${resp.statusText}`;
+    const error = new Error(msg);
+    error.status = resp.status;
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
+};
+
 const formatPercent = (value) => {
   if (value === null || value === undefined || Number.isNaN(value)) return '--';
   return `${Number(value).toFixed(1)}%`;
@@ -392,11 +417,14 @@ export default function App() {
   const [deployments, setDeployments] = useState([]);
   const [selectedDeployments, setSelectedDeployments] = useState([]);
   const [events, setEvents] = useState([]);
+  const [registryEvents, setRegistryEvents] = useState([]);
   const [selectedEvent, setSelectedEvent] = useState('');
   const [eventNameInput, setEventNameInput] = useState('');
   const [eventCreateConflict, setEventCreateConflict] = useState(null);
   const [pendingEventId, setPendingEventId] = useState('');
   const [pendingEventName, setPendingEventName] = useState('');
+  const [selectedEventDetail, setSelectedEventDetail] = useState(null);
+  const [eventDetailMessage, setEventDetailMessage] = useState('');
   const [selectedNodeIds, setSelectedNodeIds] = useState([]);
   const [aliasNodeInput, setAliasNodeInput] = useState('');
   const [aliasTempEventInput, setAliasTempEventInput] = useState('');
@@ -439,24 +467,30 @@ export default function App() {
   const pollSeconds = POLL_INTERVALS[pollIndex] || POLL_INTERVALS[POLL_INTERVALS.length - 1];
   const eventNameMap = useMemo(() => {
     const map = new Map();
-    events.forEach((event) => {
+    const addEventLabel = (event) => {
+      if (!event) return;
       const label = event.event_name || event.name || event.event_id;
       if (event.event_id && label) {
         map.set(event.event_id, label);
       }
-    });
+    };
+    events.forEach(addEventLabel);
+    registryEvents.forEach(addEventLabel);
     if (pendingEventId && pendingEventName) {
       map.set(pendingEventId, pendingEventName);
     }
     return map;
-  }, [events, pendingEventId, pendingEventName]);
+  }, [events, registryEvents, pendingEventId, pendingEventName]);
   const eventLabelForId = (eventId) => {
     if (!eventId) return '';
     return eventNameMap.get(eventId) || eventId;
   };
-  const selectedEventDetail = useMemo(
-    () => events.find((event) => event.event_id === selectedEvent) || null,
-    [events, selectedEvent]
+  const selectedEventSummary = useMemo(
+    () =>
+      events.find((event) => event.event_id === selectedEvent) ||
+      registryEvents.find((event) => event.event_id === selectedEvent) ||
+      null,
+    [events, registryEvents, selectedEvent]
   );
   const activeEventsCount = useMemo(
     () => {
@@ -467,6 +501,25 @@ export default function App() {
     },
     [events]
   );
+  const formatEventOptionLabel = (event) => {
+    if (!event) return '';
+    const label = event.event_name || event.name || event.event_id || '';
+    if (event.event_id && label && label !== event.event_id) {
+      return `${label} (${event.event_id})`;
+    }
+    return label || event.event_id || '';
+  };
+  const activeEventIds = useMemo(
+    () => new Set(events.map((event) => event.event_id).filter(Boolean)),
+    [events]
+  );
+  const registryEventIds = useMemo(
+    () => new Set(registryEvents.map((event) => event.event_id).filter(Boolean)),
+    [registryEvents]
+  );
+  const selectedActiveEventId = selectedEvent && activeEventIds.has(selectedEvent) ? selectedEvent : '';
+  const selectedRegistryEventId =
+    selectedEvent && registryEventIds.has(selectedEvent) ? selectedEvent : '';
   const mapBlocked = mapStatus?.blocked || {};
   const mapFleet = mapStatus?.fleet || {};
   const mapPct = mapStatus?.pct || {};
@@ -561,6 +614,25 @@ export default function App() {
     });
     return [...ids];
   }, [nodes, selectedEvent]);
+  const eventNodeEntries = useMemo(() => {
+    const entries = Array.isArray(selectedEventDetail?.nodes)
+      ? selectedEventDetail.nodes
+      : [];
+    const normalized = entries
+      .map((entry) => ({
+        node_id: entry?.node_id ? String(entry.node_id).trim() : '',
+        joined_at: entry?.joined_at || 0,
+        ended_at: entry?.ended_at || 0,
+      }))
+      .filter((entry) => entry.node_id);
+    normalized.sort((a, b) => a.node_id.localeCompare(b.node_id));
+    return normalized;
+  }, [selectedEventDetail]);
+  const eventNodeIds = useMemo(
+    () => eventNodeEntries.map((entry) => entry.node_id),
+    [eventNodeEntries]
+  );
+  const eventNodeIdSet = useMemo(() => new Set(eventNodeIds), [eventNodeIds]);
   const availableNodes = useMemo(() => {
     const seen = new Set();
     const options = [];
@@ -798,22 +870,45 @@ export default function App() {
       if (!resp.ok) throw new Error('Failed to load events');
       const payload = await resp.json();
       const items = Array.isArray(payload.events) ? payload.events : [];
-      const eventIds = items.map((item) => item.event_id).filter(Boolean);
       setEvents(items);
-      if (eventIds.length === 0) {
-        if (selectedEvent && selectedEvent !== pendingEventId) setSelectedEvent('');
-      } else if (
-        selectedEvent &&
-        !eventIds.includes(selectedEvent) &&
-        selectedEvent !== pendingEventId
-      ) {
-        setSelectedEvent('');
-      }
     } catch (err) {
       setEvents([]);
-      if (selectedEvent && selectedEvent !== pendingEventId) {
-        setSelectedEvent('');
+    }
+  };
+
+  const fetchRegistryEvents = async () => {
+    try {
+      const resp = await fetch(`${API_BASE}/events/registry`, { cache: 'no-store' });
+      if (!resp.ok) throw new Error('Failed to load event registry');
+      const payload = await resp.json();
+      const items = Array.isArray(payload.events) ? payload.events : [];
+      setRegistryEvents(items);
+    } catch (err) {
+      setRegistryEvents([]);
+    }
+  };
+
+  const fetchEventDetail = async (eventId) => {
+    if (!eventId) {
+      setSelectedEventDetail(null);
+      setEventDetailMessage('');
+      return;
+    }
+    try {
+      const resp = await fetch(`${API_BASE}/events/${encodeURIComponent(eventId)}`, {
+        cache: 'no-store',
+      });
+      const payload = await parseJson(resp);
+      if (!resp.ok) {
+        const msg =
+          payload?.error || payload?.message || 'Failed to load event details';
+        throw new Error(msg);
       }
+      setSelectedEventDetail(payload);
+      setEventDetailMessage('');
+    } catch (err) {
+      setSelectedEventDetail(null);
+      setEventDetailMessage(err.message || 'Unable to load event details.');
     }
   };
 
@@ -871,30 +966,42 @@ export default function App() {
     }
     setEventCreateConflict(null);
     try {
-      const resp = await fetch(`${API_BASE}/events/create`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event_name: name })
-      });
-      if (resp.status === 409) {
-        const payload = await resp.json();
-        setEventCreateConflict(payload);
-        setStatusMessage('Event name already exists.');
-        return;
-      }
-      if (!resp.ok) throw new Error('Failed to create event');
-      const payload = await resp.json();
+      const payload = await apiPost(`${API_BASE}/events/create`, { event_name: name });
       await fetchEvents();
+      await fetchRegistryEvents();
       setEventNameInput('');
       if (payload?.event_id) {
         setSelectedEvent(payload.event_id);
         setPendingEventId(payload.event_id);
         setPendingEventName(payload?.event_name || payload?.name || name);
         setSelectedNodeIds([]);
+        setRegistryEvents((prev) => {
+          if (prev.some((entry) => entry.event_id === payload.event_id)) return prev;
+          return [
+            {
+              event_id: payload.event_id,
+              event_name: payload?.event_name || payload?.name || name,
+              created_at: payload?.created_at,
+              started_at: payload?.started_at,
+              ended_at: payload?.ended_at,
+              status: payload?.status || 'active',
+            },
+            ...prev,
+          ];
+        });
       }
       setStatusMessage(`Event created: ${payload?.event_name || payload?.name || name}`);
     } catch (err) {
-      setStatusMessage('Unable to create event.');
+      if (err?.status === 409 && err?.payload) {
+        setEventCreateConflict(err.payload);
+        const conflictMsg =
+          err.message === 'event_name_exists'
+            ? 'Event name already exists.'
+            : err.message;
+        setStatusMessage(conflictMsg || 'Event name already exists.');
+        return;
+      }
+      setStatusMessage(err.message || 'Unable to create event.');
     }
   };
 
@@ -908,6 +1015,9 @@ export default function App() {
     setSelectedEvent(existing.event_id);
     setPendingEventId(existing.event_id);
     setPendingEventName(existing.event_name || existing.event_id);
+    setSelectedNodeIds([]);
+    setAliasNodeInput('');
+    setAliasTempEventInput('');
     setEventCreateConflict(null);
     setStatusMessage(`Using existing event: ${existing.event_name || existing.event_id}`);
   };
@@ -924,23 +1034,25 @@ export default function App() {
     if (!selectedEvent) return;
     if (!window.confirm('End this event?')) return;
     try {
-      const resp = await fetch(`${API_BASE}/events/${encodeURIComponent(selectedEvent)}/end`, {
-        method: 'POST'
-      });
-      if (!resp.ok) throw new Error('Failed to end event');
+      await apiPost(`${API_BASE}/events/${encodeURIComponent(selectedEvent)}/end`);
       await fetchEvents();
+      await fetchRegistryEvents();
+      await fetchEventDetail(selectedEvent);
       setStatusMessage('Event ended.');
       if (pendingEventId === selectedEvent) {
         setPendingEventId('');
         setPendingEventName('');
       }
     } catch (err) {
-      setStatusMessage('Unable to end event.');
+      setStatusMessage(err.message || 'Unable to end event.');
     }
   };
 
   const toggleNodeSelection = (nodeId) => {
     setSelectedNodeIds((prev) => {
+      if (eventNodeIdSet.has(nodeId)) {
+        return prev;
+      }
       if (prev.includes(nodeId)) {
         return prev.filter((id) => id !== nodeId);
       }
@@ -958,18 +1070,13 @@ export default function App() {
       return;
     }
     try {
-      const resp = await fetch(
+      const payload = await apiPost(
         `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/add_nodes`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ node_ids: selectedNodeIds })
-        }
+        { node_ids: selectedNodeIds }
       );
-      if (!resp.ok) throw new Error('Failed to add nodes');
-      const payload = await resp.json();
       setSelectedNodeIds([]);
       await fetchNodes();
+      await fetchEventDetail(selectedEvent);
       if (pendingEventId === selectedEvent) {
         setPendingEventId('');
         setPendingEventName('');
@@ -979,7 +1086,7 @@ export default function App() {
       const missingNote = missingCount ? ` (${missingCount} missing)` : '';
       setStatusMessage(`Added ${addedCount} node(s) to event${missingNote}.`);
     } catch (err) {
-      setStatusMessage('Unable to add nodes to event.');
+      setStatusMessage(err.message || 'Unable to add nodes to event.');
     }
   };
 
@@ -992,22 +1099,18 @@ export default function App() {
     }
     if (!window.confirm('Merge temp event into selected event?')) return;
     try {
-      const resp = await fetch(
-        `${API_BASE}/events/${encodeURIComponent(selectedEvent)}/aliases`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ node_id: nodeId, temp_event_id: tempEventId })
-        }
-      );
-      if (!resp.ok) throw new Error('Failed to merge temp event');
+      await apiPost(`${API_BASE}/events/${encodeURIComponent(selectedEvent)}/aliases`, {
+        node_id: nodeId,
+        temp_event_id: tempEventId
+      });
       setAliasNodeInput('');
       setAliasTempEventInput('');
       await fetchEvents();
+      await fetchEventDetail(selectedEvent);
       await fetchReportSummary();
       setStatusMessage(`Merged temp event ${tempEventId} for ${nodeId}.`);
     } catch (err) {
-      setStatusMessage('Unable to merge temp event.');
+      setStatusMessage(err.message || 'Unable to merge temp event.');
     }
   };
 
@@ -1301,10 +1404,37 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    fetchRegistryEvents();
+    const interval = setInterval(fetchRegistryEvents, 300000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
     fetchEvents();
     const interval = setInterval(fetchEvents, 60000);
     return () => clearInterval(interval);
   }, [selectedDeployments, pendingEventId]);
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      setSelectedEventDetail(null);
+      setEventDetailMessage('');
+      return;
+    }
+    fetchEventDetail(selectedEvent);
+  }, [selectedEvent]);
+
+  useEffect(() => {
+    if (!selectedEvent || eventNodeIdSet.size === 0) return;
+    setSelectedNodeIds((prev) => prev.filter((id) => !eventNodeIdSet.has(id)));
+  }, [selectedEvent, eventNodeIdSet]);
+
+  useEffect(() => {
+    if (!selectedEvent || selectedEvent === pendingEventId) return;
+    if (!activeEventIds.has(selectedEvent) && !registryEventIds.has(selectedEvent)) {
+      setSelectedEvent('');
+    }
+  }, [selectedEvent, pendingEventId, activeEventIds, registryEventIds]);
 
   useEffect(() => {
     fetchNodes();
@@ -1538,30 +1668,65 @@ export default function App() {
         <div className="panel">
           <div className="panel-title">Events</div>
           <div className="event-select">
-            <select
-              value={selectedEvent}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSelectedEvent(value);
-                if (pendingEventId && value !== pendingEventId) {
-                  setPendingEventId('');
-                  setPendingEventName('');
-                }
-              }}
-            >
-              <option value="">All events</option>
-              {events.map((event) => {
-                const label = event.event_name || event.name || event.event_id;
-                const status = event.status === 'ended' ? 'ended' : 'active';
-                return (
-                  <option key={event.event_id} value={event.event_id}>
-                    {label} ({status})
-                  </option>
-                );
-              })}
-            </select>
-            <div className="event-meta">
-              {events.length ? `${activeEventsCount} active` : 'No active events'}
+            <div className="event-select-group">
+              <div className="event-select-label">Join active event</div>
+              <select
+                value={selectedActiveEventId}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setSelectedEvent(value);
+                  setSelectedNodeIds([]);
+                  setAliasNodeInput('');
+                  setAliasTempEventInput('');
+                  if (pendingEventId && value !== pendingEventId) {
+                    setPendingEventId('');
+                    setPendingEventName('');
+                  }
+                }}
+              >
+                <option value="">All events</option>
+                {events.map((event) => {
+                  const status = event.status === 'ended' ? 'ended' : 'active';
+                  return (
+                    <option key={event.event_id} value={event.event_id}>
+                      {formatEventOptionLabel(event)} ({status})
+                    </option>
+                  );
+                })}
+              </select>
+              <div className="event-meta">
+                {events.length ? `${activeEventsCount} active` : 'No active events'}
+              </div>
+            </div>
+            <div className="event-select-group">
+              <div className="event-select-label">Choose from registry</div>
+              <select
+                value={selectedRegistryEventId}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setSelectedEvent(value);
+                  setSelectedNodeIds([]);
+                  setAliasNodeInput('');
+                  setAliasTempEventInput('');
+                  if (pendingEventId && value !== pendingEventId) {
+                    setPendingEventId('');
+                    setPendingEventName('');
+                  }
+                }}
+              >
+                <option value="">Select registry event</option>
+                {registryEvents.map((event) => {
+                  const status = event.status === 'ended' ? 'ended' : 'active';
+                  return (
+                    <option key={event.event_id} value={event.event_id}>
+                      {formatEventOptionLabel(event)} ({status})
+                    </option>
+                  );
+                })}
+              </select>
+              <div className="event-meta">
+                {registryEvents.length ? `${registryEvents.length} total` : 'No registry events'}
+              </div>
             </div>
           </div>
           <div className="event-create">
@@ -1612,7 +1777,7 @@ export default function App() {
               className="btn ghost"
               onClick={endEvent}
               type="button"
-              disabled={!selectedEvent || selectedEventDetail?.status === 'ended'}
+              disabled={!selectedEvent || selectedEventSummary?.status === 'ended'}
             >
               End Event
             </button>
@@ -1628,25 +1793,51 @@ export default function App() {
                 </div>
                 <div className="event-row">
                   <strong>Status:</strong>{' '}
-                  {selectedEventDetail?.status ||
+                  {selectedEventSummary?.status ||
                     (pendingEventId === selectedEvent ? 'pending' : 'active')}
                 </div>
-                {selectedEventDetail?.started_at || selectedEventDetail?.created_at ? (
+                {selectedEventSummary?.started_at || selectedEventSummary?.created_at ? (
                   <div className="event-row">
                     <strong>Started:</strong>{' '}
                     {formatEventTimestamp(
-                      selectedEventDetail?.started_at || selectedEventDetail?.created_at
+                      selectedEventSummary?.started_at || selectedEventSummary?.created_at
                     )}
                   </div>
                 ) : null}
-                {selectedEventDetail?.count !== undefined ? (
+                {selectedEventSummary?.count !== undefined ? (
                   <div className="event-row">
-                    <strong>Systems:</strong> {selectedEventDetail.count}
+                    <strong>Systems:</strong> {selectedEventSummary.count}
                   </div>
                 ) : null}
                 <div className="event-row">
                   <strong>Live nodes:</strong>{' '}
                   {liveEventNodes.length ? liveEventNodes.join(', ') : 'None'}
+                </div>
+                <div className="event-row">
+                  <strong>Nodes in event:</strong>
+                </div>
+                <div className="event-nodes">
+                  {eventDetailMessage ? (
+                    <div className="empty">{eventDetailMessage}</div>
+                  ) : eventNodeEntries.length ? (
+                    eventNodeEntries.map((entry) => (
+                      <div
+                        key={entry.node_id}
+                        className={`event-node ${entry.ended_at ? 'ended' : ''}`}
+                      >
+                        <div>
+                          <div className="event-node-title">{entry.node_id}</div>
+                          <div className="event-node-meta">
+                            {entry.ended_at
+                              ? `Ended ${formatEventTimestamp(entry.ended_at)}`
+                              : `Joined ${formatEventTimestamp(entry.joined_at)}`}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="empty">No nodes in this event.</div>
+                  )}
                 </div>
               </div>
               <div className="event-node-add">
@@ -1657,18 +1848,23 @@ export default function App() {
                 ) : null}
                 {availableNodes.length ? (
                   <div className="event-node-list">
-                    {availableNodes.map((node) => (
-                      <label key={node.node_id} className="checkbox event-node-option">
-                        <input
-                          type="checkbox"
-                          checked={selectedNodeIds.includes(node.node_id)}
-                          onChange={() => toggleNodeSelection(node.node_id)}
-                        />
-                        <span>
-                          {node.system_id} · {node.node_id}
-                        </span>
-                      </label>
-                    ))}
+                    {availableNodes.map((node) => {
+                      const alreadyInEvent = eventNodeIdSet.has(node.node_id);
+                      return (
+                        <label key={node.node_id} className="checkbox event-node-option">
+                          <input
+                            type="checkbox"
+                            disabled={alreadyInEvent}
+                            checked={selectedNodeIds.includes(node.node_id)}
+                            onChange={() => toggleNodeSelection(node.node_id)}
+                          />
+                          <span>
+                            {node.system_id} · {node.node_id}
+                            {alreadyInEvent ? ' (already in event)' : ''}
+                          </span>
+                        </label>
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="empty">No alive nodes available.</div>
