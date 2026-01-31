@@ -255,9 +255,12 @@ When working in tandem:
   ```
 
 ### Cloud Claude
-- **Working on:** MQTT broker prototype complete, remote write ready
+- **Working on:** Integration verified
 - **Blocked by:** (nothing)
-- **Notes:** Cloud stack running, both MQTT and remote write verified.
+- **Notes:**
+  - ✅ Remote write confirmed - receiving `acuvim_*:10s_avg` and `victron_*:10s_avg` metrics
+  - ✅ MQTT broker running, waiting for edge bridge connection
+  - Next: Fleet map UI WebSocket integration once edge MQTT bridge is active
 
 **Remote Write Details for Edge:**
 ```
