@@ -255,25 +255,49 @@ When working in tandem:
   And restart vmagent.
 
 ### Cloud Claude
-- **Working on:** Initial setup complete, reviewing integration points
+- **Working on:** MQTT broker prototype complete, remote write ready
 - **Blocked by:** (nothing)
-- **Notes:** Online on VPS as of 2026-01-31. Priorities: (1) verify remote write pipeline, (2) fix stream aggr to include victron_* metrics
+- **Notes:** Cloud stack running, both MQTT and remote write verified.
 
-### Discussion: Realtime MQTT for Fleet Map
+**Remote Write Details for Edge:**
+```
+VM_REMOTE_WRITE_URL=https://metrics.overdrive.rocks/api/v1/write
+VM_REMOTE_WRITE_USERNAME=ovr
+VM_REMOTE_WRITE_PASSWORD_FILE=/etc/ovr/secrets/remote_write_password
+```
+Password is in `/etc/ovr/secrets/remote_write_password` on the edge node (should already exist from provisioning).
 
-**Goal:** Cloud fleet map gets realtime data without storing in VM.
+Endpoint tested - returns 401 without auth (correct). Ready to receive data.
 
-**Proposed approach:**
-1. Add Mosquitto to cloud stack (internal, or exposed for edge bridges)
-2. Each edge Mosquitto bridges summary topic `ovr/<node_id>/realtime` to cloud broker
-3. Fleet map UI subscribes to cloud broker via WebSocket
+### Realtime MQTT for Fleet Map - Status
 
-**Edge Claude** will publish summary JSON to local `ovr/<node_id>/realtime` topic.
-**Cloud Claude** needs to: add Mosquitto to cloud stack, expose WebSocket for browser.
+**Cloud side DONE:**
+- Mosquitto added to cloud stack (`cloud/mosquitto/`)
+- Raw MQTT on port 1883 (edge bridges connect here)
+- WebSocket on port 9001 (proxied via Caddy at `/mqtt`)
+- ACL: authenticated users can pub/sub, anonymous can read-only
+- Dev password: `ovr-bridge` / `devpassword123`
 
-Bandwidth is minimal (~1KB/min per system for SOC/voltage/power/mode).
+**Edge side TODO:**
+1. Events service publishes summary to local `ovr/<node_id>/realtime` topic
+2. Add bridge config to edge Mosquitto (see `cloud/mosquitto/README.md`)
+3. Bridge forwards `ovr/#` to cloud broker
 
-See roadmap warning about full broker bridging - this is curated summary only, not raw GX topics.
+**Topic schema:**
+- `ovr/<node_id>/realtime` - System summary (SOC, voltage, power, mode)
+- `ovr/<node_id>/events` - Event lifecycle (start, end, join) - future
+
+**Edge bridge config (add to edge mosquitto.conf):**
+```
+connection cloud-bridge
+address 5.78.73.219:1883
+remote_username ovr-bridge
+remote_password devpassword123
+topic ovr/# out 1
+bridge_protocol_version mqttv311
+```
+
+**Fleet map UI TODO:** Subscribe to `ovr/+/realtime` via WebSocket at `wss://map.overdrive.rocks/mqtt`
 
 ---
 

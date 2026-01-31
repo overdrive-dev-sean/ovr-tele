@@ -1,0 +1,16 @@
+# OVR Cloud MQTT ACL
+# Controls who can publish/subscribe to what topics
+
+# =============================================================================
+# Authenticated users (edge bridges)
+# =============================================================================
+# Edge bridges authenticate with username and can publish/subscribe to ovr/#
+user ovr-bridge
+topic readwrite ovr/#
+
+# =============================================================================
+# Anonymous users (browser clients via WebSocket)
+# =============================================================================
+# Anonymous clients can only subscribe (read), not publish
+# This covers the WebSocket listener where allow_anonymous=true
+pattern read ovr/#

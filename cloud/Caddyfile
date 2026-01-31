@@ -35,7 +35,16 @@ map.{$BASE_DOMAIN} {
     reverse_proxy api:8089
   }
 
+  # MQTT over WebSocket for realtime fleet data
+  handle /mqtt {
+    reverse_proxy mqtt:9001
+  }
+
   handle {
     reverse_proxy map:8080
   }
 }
+
+# NOTE: mqtt.{$BASE_DOMAIN} can be added when DNS record is created
+# For now, edge bridges connect via raw MQTT on port 1883
+# Browser clients use wss://map.{$BASE_DOMAIN}/mqtt
