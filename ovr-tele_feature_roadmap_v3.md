@@ -4,7 +4,7 @@
 This roadmap is organized to keep changes **reviewable, testable, and reversible** on real edge nodes.
 It assumes your current "mostly working refactor" is living on an integration branch (ex: `feat/4-fleet-map-events`).
 
-## Status overview (2025-01-30)
+## Status overview (2026-01-31)
 
 | Milestone | Status | Notes |
 |-----------|--------|-------|
@@ -12,9 +12,10 @@ It assumes your current "mostly working refactor" is living on an integration br
 | 0.5 - Smoke scripts | ⬜ Not started | |
 | 1 - Phase 0 networking | ⬜ Not started | |
 | 2 - Peers + mesh proxy | ⬜ Not started | |
-| 3 - MQTT broker foundation | ⬜ Not started | |
-| 4 - MQTT summary plane | ⬜ Not started | |
-| 4b - MQTT control plane | ⬜ Not started | |
+| 3 - MQTT broker foundation | ✅ Done | Internal Mosquitto broker, no host ports |
+| 4 - MQTT summary plane | ✅ Done | `/api/realtime` with GX MQTT subscription |
+| 4b - MQTT control plane | ✅ Done | MQTT-based GX control via `mosquitto_pub` |
+| 4f - GX Control UX | ✅ Done | Realtime settings, optimistic UI, MQTT confirmation |
 | 4c - GX MQTT via Telegraf | ✅ Done | Starlark processor, dynamic config gen |
 | 4d - GX discovery automation | ✅ Done | Allowlist-based (not mDNS), `refresh_gx_mqtt_sources.sh` |
 | 4e - GX MQTT keepalive | ✅ Done | Integrated into refresh script, 50s timer |
@@ -141,64 +142,57 @@ For each milestone:
 
 ---
 
-## Milestone 3 — MQTT broker foundation (internal only)
+## Milestone 3 — MQTT broker foundation (internal only) ✅
 **Branch:** `feat/3-mqtt-broker-foundation`
+**Status:** Complete (merged to main 2026-01-31)
 
-### What
-- Add a local Mosquitto broker container to edge stack.
-- Default: no host port mapping (internal only).
-- Persist messages (if desired) and document topic namespace.
+### What (implemented)
+- Added Mosquitto broker container to edge stack
+- No host port mapping (internal Docker network only)
+- Persistence enabled for retained messages
+- Config at `mosquitto/mosquitto.conf`
 
-### Why
-- Establish “realtime/control plane” foundation without exposing ports or adding mesh traffic.
-
-### Acceptance
-- Broker runs; publish/subscribe works from other containers on the compose network.
-- No firewall changes required (internal only).
+### Acceptance ✅
+- Broker runs; publish/subscribe works from other containers
+- No firewall changes required (internal only)
 
 ---
 
-## Milestone 4 — MQTT summary plane + cached HTTP `/api/realtime`
+## Milestone 4 — MQTT summary plane + cached HTTP `/api/realtime` ✅
 **Branch:** `feat/4-mqtt-summary-plane`
+**Status:** Complete (merged to main 2026-01-31)
 
-### What
-- Add `mqtt-summary` service that:
-  - polls a trusted local source (recommended: `events` `/api/summary`)
-  - publishes a **tiny** JSON payload at a controlled interval (2–10s)
-  - serves cached JSON at `GET /api/realtime` (so PWA can poll cheaply over mesh)
-- Add nginx route:
-  - `/api/realtime` → `mqtt-summary` service
-- Keep payload **small and versioned**:
-  - topic: `ovr/<deployment>/<node>/summary/v1`
-  - payload: `{ts, system_id, soc, pin, pout, alarms_count, last_seen_ms, ...}`
+### What (implemented)
+- Events service subscribes directly to GX MQTT (no separate mqtt-summary service needed)
+- Background worker connects to all discovered GX devices via paho-mqtt
+- Caches SOC, voltage, power, mode from MQTT messages in memory
+- New `/api/realtime` endpoint returns cached data instantly (no VM query)
+- Payload: `{systems: [{system_id, soc, voltage, pin, pout, mode, ts, stale}, ...], ts}`
 
 ### Why
-- Gives you “live view” without pounding VM and without pushing full telemetry across mesh.
+- Dashboard updates without hitting VictoriaMetrics
+- Sub-second latency for live values
 
-### Acceptance
-- `/api/realtime` returns valid cached JSON quickly.
-- MQTT topic updates at configured interval.
-- Payload size remains small and stable.
+### Acceptance ✅
+- `/api/realtime` returns valid cached JSON instantly
+- Data refreshes in realtime via MQTT subscription
+- Payload is small and includes staleness indicator
 
 ---
 
-## Milestone 4b — MQTT control plane (Overdrive-safe commands only)
+## Milestone 4b — MQTT control plane ✅
 **Branch:** `feat/4b-mqtt-control-plane`
+**Status:** Complete (merged to main 2026-01-31)
 
-### What
-- Add `mqtt-control` service that subscribes to:
-  - `ovr/<deployment>/<node>/cmd/v1`
-- Allowed actions: **Overdrive-safe** operations only (events/notes/location) — *not inverter power controls yet*.
-- Translate commands → existing local HTTP APIs, publish ack:
-  - `ovr/<deployment>/<node>/ack/v1`
+### What (implemented)
+- GX control via MQTT using `mosquitto_pub` from events container
+- Settings: inverter_mode, battery_charge_current, ac_input_current_limit, inverter_output_voltage
+- Frontend system selector dropdown for multi-unit control
+- Host networking enables direct GX device access
 
-### Why
-- Gives you a clean command bus for field ops without coupling PWA to device protocols.
-
-### Acceptance
-- Valid commands produce expected HTTP calls and ack `ok=true`.
-- Invalid commands ack `ok=false` with error.
-
+### Acceptance ✅
+- MQTT writes to GX devices work for all 4 settings
+- Multi-system support with system_id selector
 ---
 
 ## Milestone 4c — GX MQTT ingestion via Telegraf ✅
@@ -262,6 +256,32 @@ For each milestone:
 ### Acceptance ✅
 - GX devices continue publishing metrics steadily
 - No republish storms (empty message body)
+
+---
+
+## Milestone 4f — GX Control UX improvements ✅
+**Branch:** `main`
+**Status:** Complete (merged to main 2026-01-31)
+
+### What (implemented)
+- New `/api/gx/settings/realtime` endpoint with MQTT cache + VictoriaMetrics fallback
+- Source tracking field (`mqtt`, `vm`, `none`) to distinguish real device confirmations from stale data
+- Frontend optimistic UI updates (instant visual feedback when changing settings)
+- Pending confirmation state with amber color and "(confirming...)" indicator
+- MQTT-only confirmation logic (only confirms when GX device publishes new value via MQTT)
+- Fixed nginx proxy to use Docker gateway IP for events service on host network
+
+### Why
+- Settings now load instantly from MQTT cache instead of slow VM queries
+- Users see immediate feedback when changing settings
+- Visual distinction between "sent" (amber) and "confirmed by device" (normal) states
+- Prevents false confirmations from stale VictoriaMetrics data
+
+### Acceptance ✅
+- Settings load instantly from MQTT cache with VM fallback
+- Changing a setting shows immediate optimistic update in amber
+- Confirmation only triggers when GX device confirms via MQTT (source: mqtt)
+- Timeout after 20s clears pending state with warning
 
 ---
 
