@@ -257,6 +257,8 @@ export default function App() {
   const [editingImageCaption, setEditingImageCaption] = useState('');
   const [lightboxImage, setLightboxImage] = useState(null);
   const [gxSettings, setGxSettings] = useState(null);
+  const [gxSystems, setGxSystems] = useState([]);
+  const [gxSystemId, setGxSystemId] = useState('');
   const [gxInputs, setGxInputs] = useState({
     battery_charge_current: '',
     inverter_mode: 'on',
@@ -806,9 +808,27 @@ export default function App() {
     }
   };
 
-  const loadGXSettings = async () => {
+  const loadGxSystems = async () => {
     try {
-      const data = await getJson('/gx/settings');
+      const data = await getJson('/systems');
+      const systems = data.systems || [];
+      setGxSystems(systems);
+      // Auto-select first system if none selected
+      if (systems.length > 0 && !gxSystemId) {
+        setGxSystemId(systems[0].system_id);
+      }
+      return systems;
+    } catch (err) {
+      console.warn('Failed to load GX systems:', err);
+      return [];
+    }
+  };
+
+  const loadGXSettings = async (systemId) => {
+    try {
+      const targetId = systemId || gxSystemId;
+      const url = targetId ? `/gx/settings?system_id=${encodeURIComponent(targetId)}` : '/gx/settings';
+      const data = await getJson(url);
       setGxSettings(data);
     } catch (err) {
       showModal(`Error loading settings: ${err.message}`, 'error');
@@ -888,10 +908,14 @@ export default function App() {
       showModal('Please enter a value', 'error');
       return;
     }
-    if (!window.confirm(`Set ${settingName.replace(/_/g, ' ')} to ${value}?`)) return;
+    const targetSystem = gxSystemId || (gxSystems[0]?.system_id);
+    const displaySystem = targetSystem ? ` on ${targetSystem}` : '';
+    if (!window.confirm(`Set ${settingName.replace(/_/g, ' ')} to ${value}${displaySystem}?`)) return;
 
     try {
-      const result = await postJson('/gx/setting', { setting: settingName, value });
+      const payload = { setting: settingName, value };
+      if (targetSystem) payload.system_id = targetSystem;
+      const result = await postJson('/gx/setting', payload);
       showModal(result.message || 'Setting updated', 'success');
       startGxSettingPoll(settingName, value);
       setGxInputs((prev) => ({ ...prev, [settingName]: '' }));
@@ -901,10 +925,14 @@ export default function App() {
   };
 
   const setGXSettingSelect = async (settingName, value) => {
-    if (!window.confirm(`Change inverter mode to "${value.replace(/_/g, ' ')}"?`)) return;
+    const targetSystem = gxSystemId || (gxSystems[0]?.system_id);
+    const displaySystem = targetSystem ? ` on ${targetSystem}` : '';
+    if (!window.confirm(`Change inverter mode to "${value.replace(/_/g, ' ')}"${displaySystem}?`)) return;
 
     try {
-      const result = await postJson('/gx/setting', { setting: settingName, value });
+      const payload = { setting: settingName, value };
+      if (targetSystem) payload.system_id = targetSystem;
+      const result = await postJson('/gx/setting', payload);
       showModal(result.message || 'Setting updated', 'success');
       startGxSettingPoll(settingName, value);
       setGxInputs((prev) => ({ ...prev, inverter_mode: value }));
@@ -1422,9 +1450,14 @@ export default function App() {
         )}
         <button
           className={`tab ${activeTab === 'control' ? 'active' : ''}`}
-          onClick={() => {
+          onClick={async () => {
             setActiveTab('control');
-            loadGXSettings();
+            const systems = await loadGxSystems();
+            if (systems.length > 0) {
+              loadGXSettings(systems[0].system_id);
+            } else {
+              loadGXSettings();
+            }
           }}
         >
           GX Control
@@ -2042,6 +2075,29 @@ export default function App() {
         <div className="info-box" style={{ background: '#fef3c7', border: '1px solid #f59e0b' }}>
           <strong>Warning:</strong> Changes affect the GX device immediately. Use with caution.
         </div>
+
+        {gxSystems.length > 1 && (
+          <div className="form-group" style={{ marginBottom: '20px' }}>
+            <label htmlFor="gxSystemSelect">Target System</label>
+            <select
+              id="gxSystemSelect"
+              className="control-input"
+              style={{ padding: '12px', maxWidth: '300px' }}
+              value={gxSystemId}
+              onChange={(e) => {
+                setGxSystemId(e.target.value);
+                loadGXSettings(e.target.value);
+              }}
+            >
+              {gxSystems.map((sys) => (
+                <option key={sys.system_id} value={sys.system_id}>
+                  {sys.system_id}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {gxStatus.message && (
           <div className={`gx-status gx-${gxStatus.level}`}>{gxStatus.message}</div>
         )}
@@ -2180,7 +2236,7 @@ export default function App() {
 
         <button
           className="btn"
-          onClick={loadGXSettings}
+          onClick={() => loadGXSettings(gxSystemId)}
           style={{ background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)' }}
         >
           REFRESH VALUES
