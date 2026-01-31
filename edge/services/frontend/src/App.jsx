@@ -236,6 +236,7 @@ export default function App() {
     pout: null,
     alerts: []
   });
+  const [dashboardSystems, setDashboardSystems] = useState([]);
   const [activeEventId, setActiveEventId] = useState('');
   const [activeLoggers, setActiveLoggers] = useState([]);
   const [eventIdInput, setEventIdInput] = useState('');
@@ -474,6 +475,15 @@ export default function App() {
       });
     } catch (err) {
       console.warn('Failed to load summary:', err);
+    }
+  };
+
+  const loadDashboard = async () => {
+    try {
+      const data = await getJson('/api/dashboard');
+      setDashboardSystems(data.systems || []);
+    } catch (err) {
+      console.warn('Failed to load dashboard:', err);
     }
   };
 
@@ -899,15 +909,18 @@ export default function App() {
   };
   useEffect(() => {
     loadSummary();
+    loadDashboard();
     loadGps(false);
     loadActiveLocations();
 
     const fastTimer = setInterval(loadSummary, 1000);
     const slowTimer = setInterval(loadSummary, 10000);
+    const dashboardTimer = setInterval(loadDashboard, 5000);
 
     return () => {
       clearInterval(fastTimer);
       clearInterval(slowTimer);
+      clearInterval(dashboardTimer);
       stopGxSettingPoll();
     };
   }, []);
@@ -1367,6 +1380,15 @@ export default function App() {
           Events
         </button>
         <button
+          className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`}
+          onClick={() => {
+            setActiveTab('dashboard');
+            loadDashboard();
+          }}
+        >
+          Dashboard
+        </button>
+        <button
           className={`tab ${activeTab === 'control' ? 'active' : ''}`}
           onClick={() => {
             setActiveTab('control');
@@ -1384,6 +1406,55 @@ export default function App() {
         >
           Map
         </button>
+      </div>
+
+      <div className={`tab-content ${activeTab === 'dashboard' ? 'active' : ''}`}>
+        <div className="dashboard-grid">
+          {dashboardSystems.length === 0 ? (
+            <div className="info-box">No GX systems discovered</div>
+          ) : (
+            dashboardSystems.map((sys) => {
+              const socClass = sys.soc >= 80 ? 'soc-good' : sys.soc >= 30 ? 'soc-warn' : 'soc-bad';
+              const modeLabel = INVERTER_MODE_LABELS[sys.mode] || `Mode ${sys.mode}`;
+              return (
+                <div key={sys.system_id} className="dashboard-card">
+                  <div className="dashboard-card-header">
+                    <span className="dashboard-system-name">{sys.system_id}</span>
+                    {sys.alerts_count > 0 && (
+                      <span className="dashboard-alert-badge">{sys.alerts_count}</span>
+                    )}
+                  </div>
+                  <div className="dashboard-card-body">
+                    <div className={`dashboard-metric ${socClass}`}>
+                      <span className="dashboard-metric-label">SOC</span>
+                      <span className="dashboard-metric-value">
+                        {sys.soc !== null ? `${Math.round(sys.soc)}%` : '--'}
+                      </span>
+                    </div>
+                    <div className="dashboard-metric">
+                      <span className="dashboard-metric-label">Voltage</span>
+                      <span className="dashboard-metric-value">
+                        {sys.voltage !== null ? `${sys.voltage.toFixed(1)}V` : '--'}
+                      </span>
+                    </div>
+                    <div className="dashboard-metric">
+                      <span className="dashboard-metric-label">P in</span>
+                      <span className="dashboard-metric-value">{formatPower(sys.pin)}</span>
+                    </div>
+                    <div className="dashboard-metric">
+                      <span className="dashboard-metric-label">P out</span>
+                      <span className="dashboard-metric-value">{formatPower(sys.pout)}</span>
+                    </div>
+                    <div className="dashboard-metric">
+                      <span className="dashboard-metric-label">Mode</span>
+                      <span className="dashboard-metric-value">{modeLabel}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
       </div>
 
       <div className={`tab-content ${activeTab === 'events' ? 'active' : ''}`}>

@@ -395,6 +395,83 @@ textarea {
   color: #b91c1c;
 }
 
+/* Dashboard grid */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.dashboard-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.dashboard-card-header {
+  background: #f9fafb;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dashboard-system-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: #111827;
+}
+
+.dashboard-alert-badge {
+  background: #ef4444;
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.dashboard-card-body {
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.dashboard-metric {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  background: #f9fafb;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.dashboard-metric.soc-good {
+  background: #dcfce7;
+}
+
+.dashboard-metric.soc-warn {
+  background: #fef9c3;
+}
+
+.dashboard-metric.soc-bad {
+  background: #fee2e2;
+}
+
+.dashboard-metric-label {
+  color: #6b7280;
+}
+
+.dashboard-metric-value {
+  font-weight: 600;
+  color: #111827;
+}
+
 .map-container {
   height: 320px;
   border-radius: 10px;
