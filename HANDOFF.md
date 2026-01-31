@@ -240,9 +240,9 @@ When working in tandem:
 - **Notes:** All branches merged, clean state
 
 ### Cloud Claude
-- **Working on:** (not yet started)
+- **Working on:** Initial setup complete, reviewing integration points
 - **Blocked by:** (nothing)
-- **Notes:** Need to pull repo on VPS
+- **Notes:** Online on VPS as of 2026-01-31. Priorities: (1) verify remote write pipeline, (2) fix stream aggr to include victron_* metrics
 
 ---
 
