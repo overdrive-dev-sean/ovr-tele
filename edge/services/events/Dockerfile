@@ -11,6 +11,10 @@ ENV APP_VERSION="${APP_VERSION}" \
     GIT_SHA="${GIT_SHA}"
 
 WORKDIR /app
+
+# Install mosquitto-clients for MQTT-based GX control
+RUN apt-get update && apt-get install -y --no-install-recommends mosquitto-clients && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
