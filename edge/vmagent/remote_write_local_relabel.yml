@@ -1,3 +1,9 @@
+# Drop aggregated metrics locally (cloud only)
 - action: drop
   source_labels: [__name__]
   regex: '.*:10s_avg$'
+
+# Drop federated victron metrics locally (Telegraf already writes them directly)
+- action: drop
+  source_labels: [job]
+  regex: 'vm_federate_victron'

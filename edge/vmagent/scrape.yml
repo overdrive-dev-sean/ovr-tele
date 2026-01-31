@@ -38,3 +38,14 @@ scrape_configs:
     static_configs:
       - targets:
           - "victoria-metrics:8428"
+
+  # Federate victron metrics from VM (written by Telegraf) for stream aggregation
+  - job_name: vm_federate_victron
+    scrape_interval: 10s
+    metrics_path: /federate
+    params:
+      match[]:
+        - '{__name__=~"victron_.*"}'
+    static_configs:
+      - targets:
+          - "victoria-metrics:8428"

@@ -1,3 +1,5 @@
-- match: '{job=~"vm_federate_acuvim"}'
+# Stream aggregation for cloud remote write
+# Creates :10s_avg suffix metrics for downsampled transmission
+- match: '{job=~"vm_federate_acuvim|vm_federate_victron"}'
   interval: 10s
   outputs: [avg]
