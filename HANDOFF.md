@@ -244,6 +244,22 @@ When working in tandem:
 - **Blocked by:** (nothing)
 - **Notes:** Online on VPS as of 2026-01-31. Priorities: (1) verify remote write pipeline, (2) fix stream aggr to include victron_* metrics
 
+### Discussion: Realtime MQTT for Fleet Map
+
+**Goal:** Cloud fleet map gets realtime data without storing in VM.
+
+**Proposed approach:**
+1. Add Mosquitto to cloud stack (internal, or exposed for edge bridges)
+2. Each edge Mosquitto bridges summary topic `ovr/<node_id>/realtime` to cloud broker
+3. Fleet map UI subscribes to cloud broker via WebSocket
+
+**Edge Claude** will publish summary JSON to local `ovr/<node_id>/realtime` topic.
+**Cloud Claude** needs to: add Mosquitto to cloud stack, expose WebSocket for browser.
+
+Bandwidth is minimal (~1KB/min per system for SOC/voltage/power/mode).
+
+See roadmap warning about full broker bridging - this is curated summary only, not raw GX topics.
+
 ---
 
 ## Quick Reference
