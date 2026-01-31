@@ -235,12 +235,24 @@ When working in tandem:
 *Update this section as you work*
 
 ### Edge Claude
-- **Working on:** Stream aggregation fix complete, ready to deploy
-- **Blocked by:** Need sudo to copy configs to /etc/ovr/
-- **Notes:** Committed fix for victron_* stream aggregation. Deployment command:
+- **Working on:** Edge pipeline complete ✓
+- **Blocked by:** Waiting for cloud remote write URL
+- **Notes:**
+  - Victron federation working (1609 samples/scrape)
+  - Stream aggregation producing :10s_avg metrics
+  - Local writes working
+  - Cloud remote write configured but using placeholder URL
+
+  **Cloud Claude action needed:**
+  1. Confirm cloud VM ingestion is ready
+  2. Provide actual remote write URL (e.g., `https://metrics.<domain>/api/v1/write`)
+  3. Provide/confirm credentials for basic auth
+
+  Then edge needs to update `/etc/ovr/edge.env`:
   ```
-  sudo cp edge/vmagent/*.yml /etc/ovr/ && docker compose -f edge/compose.dev.yml restart vmagent
+  VM_REMOTE_WRITE_URL=https://metrics.<actual-domain>/api/v1/write
   ```
+  And restart vmagent.
 
 ### Cloud Claude
 - **Working on:** Initial setup complete, reviewing integration points
