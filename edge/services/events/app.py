@@ -624,7 +624,8 @@ def detect_device_configuration(system_id: str, start_time: int, end_time: int) 
     
     # Try Victron first (Pro6000/Pro600) - test all variants
     for sid in system_id_variants:
-        victron_query = f'victron_ac_out_power{{system_id="{escape_prom_label_value(sid)}"}}'
+        sid_escaped = escape_prom_label_value(sid)
+        victron_query = f'victron_vebus_ac_out_p_value{{system_id="{sid_escaped}"}}'
         if vm_metric_exists(victron_query, start_time, end_time):
             actual_system_id = sid
             break
@@ -633,45 +634,43 @@ def detect_device_configuration(system_id: str, start_time: int, end_time: int) 
         config["source"] = "victron"
         config["detection_confidence"] = "high"
         config["system_id"] = actual_system_id  # Use the matched variant for queries
-        
-        # Check which phases exist and have data (use actual_system_id that was found)
-        l1_query = f'victron_ac_out_l1_p{{system_id="{escape_prom_label_value(actual_system_id)}"}}'
-        l2_query = f'victron_ac_out_l2_p{{system_id="{escape_prom_label_value(actual_system_id)}"}}'
-        l3_query = f'victron_ac_out_l3_p{{system_id="{escape_prom_label_value(actual_system_id)}"}}'
-        
-        l1_exists = vm_has_nonzero_data(l1_query, start_time, end_time, threshold=10.0)
-        l2_exists = vm_has_nonzero_data(l2_query, start_time, end_time, threshold=10.0)
-        l3_exists = vm_has_nonzero_data(l3_query, start_time, end_time, threshold=10.0)
-        
-        # Detect phase configuration
-        if l1_exists and l2_exists and l3_exists:
-            config["phase_config"] = "3phase"
-            config["phases"] = ["L1", "L2", "L3"]
-            config["device_model"] = "pro6000"
-        elif l1_exists and l2_exists:
-            config["phase_config"] = "split_phase"
-            config["phases"] = ["L1", "L2"]
-            config["device_model"] = "pro6000_or_pro600"
-        elif l1_exists:
+        sid_escaped = escape_prom_label_value(actual_system_id)
+
+        # Detect phase configuration from MQTT metric (new) or per-phase data (legacy)
+        phases_query = f'victron_vebus_ac_numberofphases_value{{system_id="{sid_escaped}"}}'
+        num_phases = vm_query_scalar(phases_query)
+
+        if num_phases:
+            num_phases = int(num_phases)
+            if num_phases == 3:
+                config["phase_config"] = "3phase"
+                config["phases"] = ["L1", "L2", "L3"]
+                config["device_model"] = "pro6000"
+            elif num_phases == 2:
+                config["phase_config"] = "split_phase"
+                config["phases"] = ["L1", "L2"]
+                config["device_model"] = "pro6000_or_pro600"
+            else:
+                config["phase_config"] = "single_phase"
+                config["phases"] = ["L1"]
+                config["device_model"] = "pro600"
+        else:
+            # Default to single phase if can't detect
             config["phase_config"] = "single_phase"
             config["phases"] = ["L1"]
-            config["device_model"] = "pro600"
-        else:
-            config["detection_confidence"] = "low"
-            logger.warning(f"Victron detected for {system_id} but no phase data found")
-        
-        # Detect nominal voltage
-        if l1_exists:
-            v_query = f'victron_ac_out_l1_v{{system_id="{escape_prom_label_value(actual_system_id)}"}}'
-            avg_voltage = vm_query_avg(v_query, start_time, end_time)
-            if avg_voltage:
-                config["voltage_nominal"] = detect_voltage_level(avg_voltage)
-        
-        # Check for apparent power metric
-        s_query = f'victron_ac_out_apparent{{system_id="{escape_prom_label_value(actual_system_id)}"}}'
+            config["device_model"] = "victron"
+
+        # Detect nominal voltage from AC output voltage (try MQTT first, then legacy)
+        v_query = f'victron_vebus_ac_out_v_value{{system_id="{sid_escaped}"}}'
+        avg_voltage = vm_query_avg(v_query, start_time, end_time)
+        if avg_voltage:
+            config["voltage_nominal"] = detect_voltage_level(avg_voltage)
+
+        # Check for apparent power metric (try MQTT format first)
+        s_query = f'victron_vebus_ac_out_s_value{{system_id="{sid_escaped}"}}'
         config["has_apparent_power"] = vm_metric_exists(s_query, start_time, end_time)
         config["has_reactive_power"] = False  # Victron doesn't expose Q
-        
+
         return config
     
     # Try Acuvim (power meters) - also try variants
@@ -748,62 +747,40 @@ def calculate_victron_energy(config: Dict[str, Any], start_time: int, end_time: 
     """Calculate energy metrics for Victron devices."""
     system_id = escape_prom_label_value(config["system_id"])
     methods = {}
-    
-    # Method 1: Total power integration (always available)
-    total_p_query = f'victron_ac_out_power{{system_id="{system_id}"}}'
+
+    # Method 1: Total power integration - inverter AC output
+    total_p_query = f'victron_vebus_ac_out_p_value{{system_id="{system_id}"}}'
+    energy = vm_integrate_metric(total_p_query, start_time, end_time)
+
     methods["total_power_wh"] = {
-        "value": vm_integrate_metric(total_p_query, start_time, end_time),
-        "description": "Real energy consumed - integration of total real power (W) over event duration",
-        "metric": "victron_ac_out_power",
+        "value": energy,
+        "description": "Real energy - integration of inverter AC output power (W) over event duration",
+        "metric": "victron_vebus_ac_out_p_value",
         "includes_reactive": False
     }
-    
+
     # Method 2: Apparent power integration (if available)
     if config["has_apparent_power"]:
-        total_s_query = f'victron_ac_out_apparent{{system_id="{system_id}"}}'
+        total_s_query = f'victron_vebus_ac_out_s_value{{system_id="{system_id}"}}'
         methods["apparent_power_vah"] = {
             "value": vm_integrate_metric(total_s_query, start_time, end_time),
             "description": "Apparent energy - integration of total apparent power (VA) including reactive component",
-            "metric": "victron_ac_out_apparent",
+            "metric": "victron_vebus_ac_out_s_value",
             "includes_reactive": True
         }
-    
-    # Method 3: Sum of per-phase power (if multi-phase)
-    if len(config["phases"]) > 1:
-        phase_energies = {}
-        total_phase_sum = 0.0
-        for phase in config["phases"]:
-            phase_query = f'victron_ac_out_{phase.lower()}_p{{system_id="{system_id}"}}'
-            energy = vm_integrate_metric(phase_query, start_time, end_time)
-            phase_energies[phase] = energy
-            total_phase_sum += energy
-        
-        methods["sum_of_phase_power_wh"] = {
-            "value": total_phase_sum,
-            "per_phase": phase_energies,
-            "description": f"Real energy (sum of {len(config['phases'])} individual phase measurements)",
-            "metric": "sum(victron_ac_out_lX_p)",
-            "includes_reactive": False
-        }
-    
-    # Method 4: V*I integration per phase
-    iv_total = 0.0
-    iv_per_phase = {}
-    for phase in config["phases"]:
-        v_query = f'victron_ac_out_{phase.lower()}_v{{system_id="{system_id}"}}'
-        i_query = f'victron_ac_out_{phase.lower()}_i{{system_id="{system_id}"}}'
-        energy = vm_integrate_product(v_query, i_query, start_time, end_time)
-        iv_per_phase[phase] = energy
-        iv_total += energy
-    
+
+    # Method 3: V*I integration (single aggregate for MQTT-based metrics)
+    v_query = f'victron_vebus_ac_out_v_value{{system_id="{system_id}"}}'
+    i_query = f'victron_vebus_ac_out_i_value{{system_id="{system_id}"}}'
+    iv_energy = vm_integrate_product(v_query, i_query, start_time, end_time)
+
     methods["integrated_iv_vah"] = {
-        "value": iv_total,
-        "per_phase": iv_per_phase,
-        "description": "Apparent energy - integration of instantaneous V*I product per phase",
-        "metric": "V*I per phase",
+        "value": iv_energy,
+        "description": "Apparent energy - integration of instantaneous V*I product",
+        "metric": "V*I (victron_vebus_ac_out_v_value * victron_vebus_ac_out_i_value)",
         "includes_reactive": True
     }
-    
+
     # Calculate average power factor if we have both real and apparent
     if "apparent_power_vah" in methods and methods["apparent_power_vah"]["value"] > 0:
         real_energy = methods["total_power_wh"]["value"]
@@ -813,7 +790,7 @@ def calculate_victron_energy(config: Dict[str, Any], start_time: int, end_time: 
         real_energy = methods["total_power_wh"]["value"]
         apparent_energy = methods["integrated_iv_vah"]["value"]
         methods["avg_power_factor"] = real_energy / apparent_energy
-    
+
     return methods
 
 
@@ -915,19 +892,15 @@ def calculate_power_stats(config: Dict[str, Any], start_time: int, end_time: int
     
     if config["source"] == "victron":
         system_id = escape_prom_label_value(config["system_id"])
-        
-        # Total power stats
-        p_query = f'victron_ac_out_power{{system_id="{system_id}"}}'
-        stats["peak_power_w"] = vm_query_scalar(f'max_over_time({p_query}[{int((end_time - start_time) / 1e9)}s])') or 0.0
+
+        # Total power stats from inverter AC output
+        p_query = f'victron_vebus_ac_out_p_value{{system_id="{system_id}"}}'
+        peak = vm_query_scalar(f'max_over_time({p_query}[{int((end_time - start_time) / 1e9)}s])')
+
+        stats["peak_power_w"] = peak or 0.0
         stats["avg_power_w"] = vm_query_avg(p_query, start_time, end_time) or 0.0
-        
-        # Per-phase stats
-        for phase in config["phases"]:
-            phase_query = f'victron_ac_out_{phase.lower()}_p{{system_id="{system_id}"}}'
-            stats["per_phase"][phase] = {
-                "peak_w": vm_query_scalar(f'max_over_time({phase_query}[{int((end_time - start_time) / 1e9)}s])') or 0.0,
-                "avg_w": vm_query_avg(phase_query, start_time, end_time) or 0.0
-            }
+
+        # Per-phase stats are not available in MQTT format (aggregated only)
     
     elif config["source"] == "acuvim":
         device_filter = f'device=~".*{config["system_id"]}.*"'
@@ -951,12 +924,9 @@ def calculate_phase_imbalance(config: Dict[str, Any], start_time: int, end_time:
     phase_avgs = []
     
     if config["source"] == "victron":
-        system_id = escape_prom_label_value(config["system_id"])
-        for phase in config["phases"]:
-            query = f'victron_ac_out_{phase.lower()}_p{{system_id="{system_id}"}}'
-            avg = vm_query_avg(query, start_time, end_time)
-            if avg:
-                phase_avgs.append(avg)
+        # Per-phase metrics not available in MQTT format
+        # Return 0 for now (only aggregate metrics available)
+        pass
     
     elif config["source"] == "acuvim":
         device_filter = f'device=~".*{config["system_id"]}.*"'
@@ -992,7 +962,7 @@ def calculate_load_distribution(config: Dict[str, Any], start_time: int, end_tim
     # Get power time series
     if config["source"] == "victron":
         system_id = escape_prom_label_value(config["system_id"])
-        query = f'victron_ac_out_power{{system_id="{system_id}"}}'
+        query = f'victron_vebus_ac_out_p_value{{system_id="{system_id}"}}'
     elif config["source"] == "acuvim":
         device_filter = f'device=~".*{config["system_id"]}.*"'
         query = f'acuvim_P{{{device_filter}}}'
@@ -1077,14 +1047,14 @@ def trim_event_times(loggers: list, start_time: int, end_time: int) -> tuple:
         data_found = False
         for sid_variant in variants:
             if not data_found:
-                # Try Victron
-                victron_query = f'victron_ac_out_power{{system_id="{escape_prom_label_value(sid_variant)}"}}'
+                # Try Victron (new MQTT metrics)
+                victron_query = f'victron_vebus_ac_out_p_value{{system_id="{escape_prom_label_value(sid_variant)}"}}'
                 data = vm_query_range(victron_query, start_time, end_time, step="10s")
-                
+
                 if data and data.get("result") and data["result"]:
                     all_power_data.extend(data["result"][0].get("values", []))
                     data_found = True
-            
+
             if not data_found:
                 # Try Acuvim
                 acuvim_query = f'acuvim_P{{device=~".*{escape_prom_label_value(sid_variant)}.*"}}'
@@ -2151,24 +2121,34 @@ def set_cached_gps(system_id: str, latitude: float, longitude: float, updated_at
 
 
 def get_gps_from_vm(system_id: str) -> tuple[Optional[float], Optional[float]]:
-    """Fetch GPS coordinates from VictoriaMetrics in a single query."""
+    """Fetch GPS coordinates from VictoriaMetrics. Uses last_over_time to get recent data even if stale."""
     label = escape_prom_label_value(system_id)
-    # Use vector query to get both lat/lon in one API call
+
+    # Metric names can be victron_gps_position_latitude_value or victron_gps_latitude
+    gps_regex = "victron_gps_(position_)?(latitude|longitude)(_value)?"
+
+    # Try current instant query first
     results = vm_query_vector(
-        f'{{__name__=~"victron_gps_(latitude|longitude)",system_id="{label}"}}'
+        f'{{__name__=~"{gps_regex}",system_id="{label}"}}'
     )
-    
+
+    # If no results, try looking back up to 1 hour for stale GPS data
+    if not results:
+        results = vm_query_vector(
+            f'last_over_time({{__name__=~"{gps_regex}",system_id="{label}"}}[1h])'
+        )
+
     lat, lon = None, None
     for series in results:
         metric = series.get("metric", {})
-        metric_name = metric.get("__name__", "")
+        metric_name = metric.get("__name__", "").lower()
         value = _vm_value_to_float(series.get("value"))
-        
-        if metric_name == "victron_gps_latitude":
+
+        if "latitude" in metric_name:
             lat = value
-        elif metric_name == "victron_gps_longitude":
+        elif "longitude" in metric_name:
             lon = value
-    
+
     return lat, lon
 
 
@@ -3339,17 +3319,31 @@ def api_summary():
     system_id = canonicalize_system_id(request.args.get("system_id", "").strip() or SYSTEM_ID)
     label = escape_prom_label_value(system_id)
 
+    # Try MQTT-based metrics first, fall back to legacy dbus2prom names
     soc = vm_query_scalar(
-        f'victron_battery_soc{{system_id="{label}"}}'
+        f'victron_battery_soc_value{{system_id="{label}"}}'
     )
+    if soc is None:
+        soc = vm_query_scalar(
+            f'victron_system_dc_battery_soc_value{{system_id="{label}"}}'
+        )
     pin = vm_query_scalar(
-        f'victron_ac_in_power{{system_id="{label}"}}'
+        f'victron_system_ac_activein_power_value{{system_id="{label}"}}'
     )
+    if pin is None:
+        pin = vm_query_scalar(
+            f'victron_vebus_ac_activein_p_value{{system_id="{label}"}}'
+        )
     pout = vm_query_scalar(
-        f'victron_ac_out_power{{system_id="{label}"}}'
+        f'victron_system_ac_consumption_power_value{{system_id="{label}"}}'
     )
+    if pout is None:
+        pout = vm_query_scalar(
+            f'victron_vebus_ac_out_p_value{{system_id="{label}"}}'
+        )
+    # Query all alarm-related metrics (battery_alarms, vebus_alarms, settings_alarm)
     alarms_series = vm_query_vector(
-        f'max_over_time({{__name__=~"victron_alarm_.*",system_id="{label}"}}[5m])'
+        f'max_over_time({{__name__=~"victron_.*alarm.*",system_id="{label}"}}[5m])'
     )
     alerts = []
     for series in alarms_series:
@@ -3661,41 +3655,111 @@ self.addEventListener("fetch", (event) => {{
 
 @app.route("/api/gx/gps", methods=["GET"])
 def api_gx_gps():
-    """Get last known GPS coordinates for a system."""
-    system_id = canonicalize_system_id(request.args.get("system_id", "").strip() or SYSTEM_ID)
+    """Get last known GPS coordinates. Tries specified system, then falls back to any available."""
+    requested_id = request.args.get("system_id", "").strip()
     refresh = request.args.get("refresh", "").strip().lower() in ("1", "true", "yes", "y")
 
-    if not refresh:
-        cached = get_cached_gps(system_id)
-        if cached:
+    # Build list of systems to try: requested first, then all discovered
+    systems_to_try = []
+    if requested_id:
+        systems_to_try.append(canonicalize_system_id(requested_id))
+    elif SYSTEM_ID:
+        systems_to_try.append(canonicalize_system_id(SYSTEM_ID))
+
+    # Add all discovered systems as fallbacks
+    discovered, _ = load_gx_systems()
+    for sys in discovered:
+        sid = sys.get("system_id")
+        if sid and sid not in systems_to_try:
+            systems_to_try.append(sid)
+
+    # Try each system until we find GPS
+    for system_id in systems_to_try:
+        if not refresh:
+            cached = get_cached_gps(system_id)
+            if cached:
+                return jsonify({
+                    "system_id": system_id,
+                    "latitude": cached["latitude"],
+                    "longitude": cached["longitude"],
+                    "updated_at": cached["updated_at"],
+                    "cached": True
+                })
+
+        lat, lon = get_gps_from_vm(system_id)
+        if lat is not None and lon is not None:
+            updated_at = int(time.time() * 1e9)
+            set_cached_gps(system_id, lat, lon, updated_at)
             return jsonify({
                 "system_id": system_id,
-                "latitude": cached["latitude"],
-                "longitude": cached["longitude"],
-                "updated_at": cached["updated_at"],
-                "cached": True
+                "latitude": lat,
+                "longitude": lon,
+                "updated_at": updated_at,
+                "cached": False
             })
 
-    lat, lon = get_gps_from_vm(system_id)
-    if lat is None or lon is None:
-        return jsonify({
-            "system_id": system_id,
-            "latitude": None,
-            "longitude": None,
-            "updated_at": None,
-            "cached": False,
-            "error": "GPS not available"
-        })
-
-    updated_at = int(time.time() * 1e9)
-    set_cached_gps(system_id, lat, lon, updated_at)
+    # No GPS found on any system
     return jsonify({
-        "system_id": system_id,
-        "latitude": lat,
-        "longitude": lon,
-        "updated_at": updated_at,
-        "cached": False
+        "system_id": systems_to_try[0] if systems_to_try else None,
+        "latitude": None,
+        "longitude": None,
+        "updated_at": None,
+        "cached": False,
+        "error": "GPS not available"
     })
+
+
+@app.route("/api/gps/all", methods=["GET"])
+def api_gps_all():
+    """Get GPS coordinates for all discovered systems in a single batched query."""
+    if not check_api_key():
+        return jsonify({"error": "Invalid API key"}), 401
+
+    systems, _ = load_gx_systems()
+    system_ids = [s.get("system_id") for s in systems if s.get("system_id")]
+
+    if not system_ids:
+        return jsonify({"systems": []})
+
+    # Single batched query for all GPS data (with 1h lookback for stale data)
+    gps_regex = 'victron_gps_(position_)?(latitude|longitude)(_value)?'
+    gps_results = vm_query_vector('{__name__=~"' + gps_regex + '"}')
+    if not gps_results:
+        gps_results = vm_query_vector('last_over_time({__name__=~"' + gps_regex + '"}[1h])')
+
+    # Index by system_id
+    gps_by_system: Dict[str, Dict[str, float]] = {}
+    for result in gps_results:
+        metric = result.get("metric", {})
+        system_id = metric.get("system_id")
+        metric_name = (metric.get("__name__") or "").lower()
+        if not system_id or not metric_name:
+            continue
+        if system_id not in gps_by_system:
+            gps_by_system[system_id] = {}
+        value = _vm_value_to_float(result.get("value"))
+        if value is not None:
+            if "latitude" in metric_name:
+                gps_by_system[system_id]["latitude"] = value
+            elif "longitude" in metric_name:
+                gps_by_system[system_id]["longitude"] = value
+
+    # Build response
+    locations = []
+    for system_id in system_ids:
+        gps = gps_by_system.get(system_id, {})
+        lat = gps.get("latitude")
+        lon = gps.get("longitude")
+        if lat is not None and lon is not None:
+            locations.append({
+                "system_id": system_id,
+                "latitude": lat,
+                "longitude": lon
+            })
+
+    resp = jsonify({"systems": locations, "count": len(locations)})
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 @app.route("/api/gx/settings", methods=["GET"])
@@ -3707,12 +3771,12 @@ def api_gx_settings_get():
     system_id = canonicalize_system_id(request.args.get("system_id", "").strip() or SYSTEM_ID)
     label = escape_prom_label_value(system_id)
     
-    # Map settings to their VictoriaMetrics metric names
+    # Map settings to their VictoriaMetrics MQTT metric names
     metric_map = {
-        "battery_charge_current": "victron_dc_max_charge_current",
-        "inverter_mode": "victron_mode_mode",
-        "ac_input_current_limit": "victron_ac_in_current_limit",
-        "inverter_output_voltage": "victron_settings_inverter_output_voltage"
+        "battery_charge_current": "victron_vebus_dc_0_maxchargecurrent_value",
+        "inverter_mode": "victron_vebus_mode_value",
+        "ac_input_current_limit": "victron_vebus_ac_activein_currentlimit_value",
+        "inverter_output_voltage": "victron_vebus_settings_inverteroutputvoltage_value"
     }
     
     settings = {}
@@ -3810,55 +3874,119 @@ def load_gx_systems():
         return [], None
 
 
-def get_system_summary(system_id: str) -> dict:
-    """Get summary metrics for a single system."""
-    label = escape_prom_label_value(system_id)
+def get_all_system_summaries(system_ids: List[str]) -> Dict[str, dict]:
+    """Get summary metrics for all systems in batched queries (2 queries total)."""
+    if not system_ids:
+        return {}
 
-    soc = vm_query_scalar(f'victron_battery_soc_value{{system_id="{label}"}}')
-    if soc is None:
-        soc = vm_query_scalar(f'victron_system_dc_battery_soc_value{{system_id="{label}"}}')
-    pin = vm_query_scalar(f'victron_system_dc_battery_power_value{{system_id="{label}"}}')
-    if pin is None:
-        pin = vm_query_scalar(f'victron_ac_in_power_value{{system_id="{label}"}}')
-    pout = vm_query_scalar(f'victron_system_ac_consumption_power_value{{system_id="{label}"}}')
-    if pout is None:
-        pout = vm_query_scalar(f'victron_ac_out_power_value{{system_id="{label}"}}')
-    voltage = vm_query_scalar(f'victron_battery_voltage_value{{system_id="{label}"}}')
-    if voltage is None:
-        voltage = vm_query_scalar(f'victron_system_dc_battery_voltage_value{{system_id="{label}"}}')
-    mode = vm_query_scalar(f'victron_vebus_mode_value{{system_id="{label}"}}')
-
-    # Get last data timestamp
-    last_seen_result = vm_query_vector(f'victron_battery_soc_value{{system_id="{label}"}}')
-    last_seen = None
-    if last_seen_result:
-        ts = last_seen_result[0].get("value", [None])[0]
-        if ts:
-            last_seen = int(float(ts) * 1e9)
-
-    # Get alarm count
-    alarms_series = vm_query_vector(
-        f'max_over_time({{__name__=~"victron_.*alarm.*",system_id="{label}"}}[5m])'
-    )
-    alerts = []
-    for series in alarms_series:
-        value = _vm_value_to_float(series.get("value"))
-        if value is not None and value >= 0.5:
-            metric = series.get("metric", {})
-            name = metric.get("name") or metric.get("__name__", "alarm")
-            alerts.append(name)
-
-    return {
-        "system_id": system_id,
-        "soc": soc,
-        "pin": pin,
-        "pout": pout,
-        "voltage": voltage,
-        "mode": mode,
-        "alerts": sorted(set(alerts)),
-        "alerts_count": len(set(alerts)),
-        "last_seen": last_seen
+    # Metric name mappings: (primary, fallback) - MQTT-based metric names
+    METRIC_MAPPINGS = {
+        "soc": ("victron_battery_soc_value", "victron_system_dc_battery_soc_value"),
+        "pin": ("victron_system_ac_activein_power_value", "victron_system_dc_battery_power_value"),
+        "pout": ("victron_system_ac_consumption_power_value", "victron_system_ac_consumptiononoutput_power_value"),
+        "voltage": ("victron_battery_dc_0_voltage_value", "victron_system_dc_battery_voltage_value"),
+        "mode": ("victron_vebus_mode_value", None),
     }
+
+    # Build regex for all metrics we need
+    all_metrics = []
+    for primary, fallback in METRIC_MAPPINGS.values():
+        all_metrics.append(primary)
+        if fallback:
+            all_metrics.append(fallback)
+    metrics_regex = "|".join(all_metrics)
+
+    # Single query for all metrics across all systems
+    metrics_query = f'{{__name__=~"{metrics_regex}"}}'
+    metrics_results = vm_query_vector(metrics_query)
+
+    # Single query for all alarms across all systems
+    alarms_query = 'max_over_time({__name__=~"victron_.*alarm.*"}[5m])'
+    alarms_results = vm_query_vector(alarms_query)
+
+    # Index results by system_id and metric name
+    metrics_by_system: Dict[str, Dict[str, Any]] = {sid: {} for sid in system_ids}
+    for result in metrics_results:
+        metric = result.get("metric", {})
+        system_id = metric.get("system_id")
+        metric_name = metric.get("__name__")
+        if system_id in metrics_by_system and metric_name:
+            value = _vm_value_to_float(result.get("value"))
+            ts = result.get("value", [None])[0]
+            metrics_by_system[system_id][metric_name] = {
+                "value": value,
+                "ts": int(float(ts) * 1e9) if ts else None
+            }
+
+    # Index alarms by system_id
+    alarms_by_system: Dict[str, List[str]] = {sid: [] for sid in system_ids}
+    for result in alarms_results:
+        metric = result.get("metric", {})
+        system_id = metric.get("system_id")
+        if system_id not in alarms_by_system:
+            continue
+        value = _vm_value_to_float(result.get("value"))
+        if value is not None and value >= 0.5:
+            name = metric.get("name") or metric.get("__name__", "alarm")
+            alarms_by_system[system_id].append(name)
+
+    # Build summaries
+    summaries = {}
+    for system_id in system_ids:
+        m = metrics_by_system.get(system_id, {})
+
+        # Extract values with fallbacks
+        def get_value(primary, fallback=None):
+            if primary in m and m[primary]["value"] is not None:
+                return m[primary]["value"]
+            if fallback and fallback in m:
+                return m[fallback]["value"]
+            return None
+
+        soc = get_value("victron_battery_soc_value", "victron_system_dc_battery_soc_value")
+        pin = get_value("victron_system_dc_battery_power_value", "victron_ac_in_power_value")
+        pout = get_value("victron_system_ac_consumption_power_value", "victron_ac_out_power_value")
+        voltage = get_value("victron_battery_voltage_value", "victron_system_dc_battery_voltage_value")
+        mode = get_value("victron_vebus_mode_value")
+
+        # Get last_seen from SOC metric timestamp
+        last_seen = None
+        if "victron_battery_soc_value" in m:
+            last_seen = m["victron_battery_soc_value"].get("ts")
+        elif "victron_system_dc_battery_soc_value" in m:
+            last_seen = m["victron_system_dc_battery_soc_value"].get("ts")
+
+        alerts = sorted(set(alarms_by_system.get(system_id, [])))
+
+        summaries[system_id] = {
+            "system_id": system_id,
+            "soc": soc,
+            "pin": pin,
+            "pout": pout,
+            "voltage": voltage,
+            "mode": mode,
+            "alerts": alerts,
+            "alerts_count": len(alerts),
+            "last_seen": last_seen
+        }
+
+    return summaries
+
+
+def get_system_summary(system_id: str) -> dict:
+    """Get summary metrics for a single system (uses batched query internally)."""
+    summaries = get_all_system_summaries([system_id])
+    return summaries.get(system_id, {
+        "system_id": system_id,
+        "soc": None,
+        "pin": None,
+        "pout": None,
+        "voltage": None,
+        "mode": None,
+        "alerts": [],
+        "alerts_count": 0,
+        "last_seen": None
+    })
 
 
 @app.route("/api/systems", methods=["GET"])
@@ -3879,14 +4007,27 @@ def api_dashboard():
     """Get summary metrics for all discovered systems."""
     systems, updated_at = load_gx_systems()
 
-    summaries = []
+    # Extract system IDs and metadata
+    system_ids = []
+    system_metadata = {}
     for sys in systems:
         system_id = sys.get("system_id")
-        if not system_id:
-            continue
-        summary = get_system_summary(system_id)
-        summary["ip"] = sys.get("ip")
-        summary["portal_id"] = sys.get("portal_id")
+        if system_id:
+            system_ids.append(system_id)
+            system_metadata[system_id] = {
+                "ip": sys.get("ip"),
+                "portal_id": sys.get("portal_id")
+            }
+
+    # Batch fetch all summaries (2 queries total instead of ~10 per system)
+    all_summaries = get_all_system_summaries(system_ids)
+
+    # Merge with metadata
+    summaries = []
+    for system_id in system_ids:
+        summary = all_summaries.get(system_id, {"system_id": system_id})
+        summary["ip"] = system_metadata[system_id]["ip"]
+        summary["portal_id"] = system_metadata[system_id]["portal_id"]
         summaries.append(summary)
 
     resp = jsonify({
