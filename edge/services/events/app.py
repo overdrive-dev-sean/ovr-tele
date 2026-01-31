@@ -23,8 +23,9 @@ import sqlite3
 import logging
 import hashlib
 import threading
+import subprocess
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from contextlib import contextmanager
 from werkzeug.utils import secure_filename
 from urllib.parse import quote
@@ -51,6 +52,12 @@ try:
     PARAMIKO_AVAILABLE = True
 except ImportError:
     PARAMIKO_AVAILABLE = False
+
+try:
+    import paho.mqtt.client as mqtt
+    PAHO_AVAILABLE = True
+except ImportError:
+    PAHO_AVAILABLE = False
 
 # Configuration from environment
 VM_WRITE_URL = os.environ.get("VM_WRITE_URL", "http://victoria-metrics:8428/write")
@@ -1984,34 +1991,96 @@ class GXSSHConnection:
 _gx_ssh = GXSSHConnection() if PARAMIKO_AVAILABLE else None
 
 
-# GX D-Bus paths for common settings
-GX_DBUS_PATHS = {
+# GX settings configuration with MQTT paths
+# MQTT topic format: W/<portal_id>/vebus/<instance>/<mqtt_path>
+GX_SETTINGS = {
     "battery_charge_current": {
-        "service": "com.victronenergy.vebus.ttyS2",
-        "path": "/Dc/0/MaxChargeCurrent",
-        "type": "int32",
+        "mqtt_service": "vebus",
+        "mqtt_path": "Dc/0/MaxChargeCurrent",
+        "type": "int",
         "description": "Battery max charge current (A)"
     },
     "inverter_mode": {
-        "service": "com.victronenergy.vebus.ttyS2",  # Adjust ttyS2 if needed
-        "path": "/Mode",
-        "type": "int32",
+        "mqtt_service": "vebus",
+        "mqtt_path": "Mode",
+        "type": "int",
         "description": "Inverter mode (3=on, 2=inverter only, 1=charger only, 4=off)",
         "values": {"on": 3, "inverter_only": 2, "charger_only": 1, "off": 4}
     },
     "ac_input_current_limit": {
-        "service": "com.victronenergy.vebus.ttyS2",
-        "path": "/Ac/ActiveIn/CurrentLimit",
-        "type": "double",
+        "mqtt_service": "vebus",
+        "mqtt_path": "Ac/ActiveIn/CurrentLimit",
+        "type": "float",
         "description": "AC input current limit (A)"
     },
     "inverter_output_voltage": {
-        "service": "com.victronenergy.vebus.ttyS2",
-        "path": "/Settings/InverterOutputVoltage",
-        "type": "int32",
+        "mqtt_service": "vebus",
+        "mqtt_path": "Settings/InverterOutputVoltage",
+        "type": "int",
         "description": "Inverter AC output voltage (V)"
     }
 }
+
+# Legacy alias for backward compatibility
+GX_DBUS_PATHS = GX_SETTINGS
+
+
+def get_vebus_instance(system_id: str) -> Optional[str]:
+    """Get the vebus instance number for a system from VictoriaMetrics."""
+    label = escape_prom_label_value(system_id)
+    query = f'victron_vebus_mode_value{{system_id="{label}"}}'
+    try:
+        resp = requests.get(f"{VM_QUERY_URL}/api/v1/query", params={"query": query}, timeout=5)
+        if resp.status_code == 200:
+            results = resp.json().get("data", {}).get("result", [])
+            if results:
+                return results[0].get("metric", {}).get("instance")
+    except Exception as e:
+        logger.error(f"Error getting vebus instance for {system_id}: {e}")
+    return None
+
+
+def mqtt_write_setting(ip: str, portal_id: str, instance: str, mqtt_path: str, value: Any) -> Tuple[bool, str]:
+    """Write a setting to a GX device via MQTT.
+
+    Args:
+        ip: GX device IP address
+        portal_id: VRM portal ID
+        instance: Service instance number (e.g., "276" for vebus)
+        mqtt_path: MQTT path (e.g., "Mode", "Dc/0/MaxChargeCurrent")
+        value: Value to set
+
+    Returns:
+        Tuple of (success, message)
+    """
+    topic = f"W/{portal_id}/vebus/{instance}/{mqtt_path}"
+    payload = json.dumps({"value": value})
+
+    try:
+        logger.info(f"MQTT write to {ip}: {topic} = {payload}")
+        result = subprocess.run(
+            ["mosquitto_pub", "-h", ip, "-t", topic, "-m", payload],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0:
+            logger.info(f"MQTT write successful: {topic} = {value}")
+            return True, f"Successfully set {mqtt_path} to {value}"
+        else:
+            error_msg = result.stderr.strip() or "Unknown error"
+            logger.error(f"MQTT write failed: {error_msg}")
+            return False, f"MQTT write failed: {error_msg}"
+    except subprocess.TimeoutExpired:
+        logger.error(f"MQTT write timeout to {ip}")
+        return False, "MQTT write timeout"
+    except FileNotFoundError:
+        logger.error("mosquitto_pub not found - install mosquitto-clients")
+        return False, "mosquitto_pub not installed"
+    except Exception as e:
+        logger.error(f"MQTT write error: {e}")
+        return False, str(e)
 
 
 # ============================================================================
@@ -2347,6 +2416,227 @@ def tile_usage_sync_worker() -> None:
         except Exception as exc:
             logger.warning(f"Tile usage sync failed: {exc}")
         _heartbeat_stop.wait(max(TILE_USAGE_SYNC_INTERVAL, 5))
+
+
+# ============================================================================
+# MQTT Realtime Summary Plane (Milestone 4)
+# ============================================================================
+
+# Thread-safe cache for realtime system summaries from GX MQTT
+_realtime_cache: Dict[str, Dict[str, Any]] = {}
+_realtime_lock = threading.Lock()
+
+# Map GX MQTT topic paths to our summary fields
+# Topic format: N/<portal_id>/<service>/<instance>/<path...>
+REALTIME_TOPIC_MAP = {
+    # Battery
+    "system/0/Dc/Battery/Soc": "soc",
+    "system/0/Dc/Battery/Power": "battery_power",
+    "system/0/Dc/Battery/Voltage": "voltage",
+    "system/0/Dc/Battery/Current": "current",
+    # AC power
+    "system/0/Ac/ConsumptionOnOutput/L1/Power": "pout_l1",
+    "system/0/Ac/ConsumptionOnOutput/L2/Power": "pout_l2",
+    "system/0/Ac/ConsumptionOnOutput/L3/Power": "pout_l3",
+    "system/0/Ac/Grid/L1/Power": "pin_l1",
+    "system/0/Ac/Grid/L2/Power": "pin_l2",
+    "system/0/Ac/Grid/L3/Power": "pin_l3",
+    # Inverter mode
+    "vebus/276/Mode": "mode",
+    "vebus/277/Mode": "mode",
+    "vebus/278/Mode": "mode",
+    # Alarms (we'll collect these separately)
+    "system/0/Alarms/LowSoc": "alarm_low_soc",
+    "system/0/Alarms/HighTemperature": "alarm_high_temp",
+}
+
+
+def _get_system_by_portal(portal_id: str) -> Optional[Dict]:
+    """Look up system info by portal_id."""
+    systems, _ = load_gx_systems()
+    for s in systems:
+        if s.get("portal_id") == portal_id:
+            return s
+    return None
+
+
+def _update_realtime_cache(system_id: str, field: str, value: Any) -> None:
+    """Update a field in the realtime cache for a system."""
+    with _realtime_lock:
+        if system_id not in _realtime_cache:
+            _realtime_cache[system_id] = {"system_id": system_id, "ts": 0}
+        _realtime_cache[system_id][field] = value
+        _realtime_cache[system_id]["ts"] = int(time.time() * 1000)
+
+
+def _compute_realtime_totals(system_id: str) -> None:
+    """Compute aggregated values (pin, pout) from phase values."""
+    with _realtime_lock:
+        if system_id not in _realtime_cache:
+            return
+        cache = _realtime_cache[system_id]
+
+        # Sum up phase powers for total pin/pout
+        pin = 0
+        pout = 0
+        for phase in ["l1", "l2", "l3"]:
+            pin_phase = cache.get(f"pin_{phase}")
+            pout_phase = cache.get(f"pout_{phase}")
+            if pin_phase is not None:
+                pin += pin_phase
+            if pout_phase is not None:
+                pout += pout_phase
+
+        cache["pin"] = pin if pin != 0 else cache.get("pin")
+        cache["pout"] = pout if pout != 0 else cache.get("pout")
+
+
+def _on_mqtt_message(client, userdata, msg):
+    """Handle incoming MQTT messages from GX devices."""
+    try:
+        # Parse topic: N/<portal_id>/<service>/<instance>/<path...>
+        parts = msg.topic.split("/")
+        if len(parts) < 4 or parts[0] != "N":
+            return
+
+        portal_id = parts[1]
+        service = parts[2]
+        instance = parts[3]
+        path = "/".join(parts[2:])  # service/instance/path...
+
+        # Look up system by portal_id
+        system = _get_system_by_portal(portal_id)
+        if not system:
+            return
+        system_id = system.get("system_id")
+        if not system_id:
+            return
+
+        # Check if this path maps to a summary field
+        field = REALTIME_TOPIC_MAP.get(path)
+        if not field:
+            return
+
+        # Parse JSON value
+        try:
+            payload = json.loads(msg.payload.decode("utf-8"))
+            value = payload.get("value")
+            if value is None:
+                return
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        # Update cache
+        _update_realtime_cache(system_id, field, value)
+
+        # Recompute totals if we got a phase value
+        if field.startswith("pin_") or field.startswith("pout_"):
+            _compute_realtime_totals(system_id)
+
+    except Exception as e:
+        logger.debug(f"Error processing MQTT message: {e}")
+
+
+def _mqtt_realtime_worker() -> None:
+    """Background worker that subscribes to GX MQTT for realtime updates."""
+    if not PAHO_AVAILABLE:
+        logger.warning("paho-mqtt not available, realtime MQTT disabled")
+        return
+
+    while not _heartbeat_stop.is_set():
+        try:
+            systems, _ = load_gx_systems()
+            if not systems:
+                logger.debug("No GX systems discovered, waiting...")
+                _heartbeat_stop.wait(30)
+                continue
+
+            # Connect to each GX device and subscribe
+            clients = []
+            for system in systems:
+                ip = system.get("ip")
+                portal_id = system.get("portal_id")
+                system_id = system.get("system_id")
+                if not ip or not portal_id:
+                    continue
+
+                try:
+                    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                    client.on_message = _on_mqtt_message
+                    client.connect(ip, 1883, keepalive=60)
+
+                    # Subscribe to relevant topics
+                    for topic_path in REALTIME_TOPIC_MAP.keys():
+                        topic = f"N/{portal_id}/{topic_path}"
+                        client.subscribe(topic)
+
+                    client.loop_start()
+                    clients.append((client, system_id))
+                    logger.info(f"MQTT realtime connected to {system_id} ({ip})")
+                except Exception as e:
+                    logger.warning(f"Failed to connect MQTT to {system_id}: {e}")
+
+            # Keep connections alive until stop signal or systems change
+            check_interval = 30
+            while not _heartbeat_stop.is_set():
+                _heartbeat_stop.wait(check_interval)
+                # Check if systems list changed
+                new_systems, _ = load_gx_systems()
+                new_ids = {s.get("system_id") for s in new_systems}
+                old_ids = {s[1] for s in clients}
+                if new_ids != old_ids:
+                    logger.info("GX systems changed, reconnecting...")
+                    break
+
+            # Cleanup
+            for client, _ in clients:
+                try:
+                    client.loop_stop()
+                    client.disconnect()
+                except:
+                    pass
+
+        except Exception as e:
+            logger.error(f"MQTT realtime worker error: {e}")
+            _heartbeat_stop.wait(10)
+
+
+def get_realtime_summary() -> Dict[str, Any]:
+    """Get the current realtime summary for all systems."""
+    with _realtime_lock:
+        result = {
+            "systems": [],
+            "ts": int(time.time() * 1000)
+        }
+        for system_id, data in _realtime_cache.items():
+            # Build clean summary
+            summary = {
+                "system_id": system_id,
+                "soc": data.get("soc"),
+                "voltage": data.get("voltage"),
+                "pin": data.get("pin"),
+                "pout": data.get("pout"),
+                "mode": data.get("mode"),
+                "ts": data.get("ts", 0),
+            }
+            # Check staleness (> 60s = stale)
+            age_ms = result["ts"] - summary["ts"]
+            summary["stale"] = age_ms > 60000
+            result["systems"].append(summary)
+
+        return result
+
+
+@app.route("/api/realtime", methods=["GET"])
+def api_realtime():
+    """Get realtime summary from MQTT cache (no VictoriaMetrics query)."""
+    if not check_api_key():
+        return jsonify({"error": "Invalid API key"}), 401
+
+    summary = get_realtime_summary()
+    resp = jsonify(summary)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 @app.route("/api/map-tiles/increment", methods=["POST"])
@@ -3823,35 +4113,79 @@ def api_gx_settings_get():
 
 @app.route("/api/gx/setting", methods=["POST"])
 def api_gx_setting_set():
-    """Set a GX device setting."""
+    """Set a GX device setting via MQTT."""
     if not check_api_key():
         return jsonify({"error": "Invalid API key"}), 401
-    
+
     data = request.get_json()
     setting_name = data.get("setting")
     value = data.get("value")
-    
+    system_id = data.get("system_id", "").strip()
+
     if not setting_name or value is None:
         return jsonify({"error": "setting and value required"}), 400
-    
-    if setting_name not in GX_DBUS_PATHS:
+
+    if setting_name not in GX_SETTINGS:
         return jsonify({"error": f"Unknown setting: {setting_name}"}), 400
-    
-    config = GX_DBUS_PATHS[setting_name]
-    
+
+    config = GX_SETTINGS[setting_name]
+
     # Handle inverter mode special case (convert string to int)
     if setting_name == "inverter_mode" and isinstance(value, str):
-        if value in config["values"]:
+        if "values" in config and value in config["values"]:
             value = config["values"][value]
         else:
-            return jsonify({"error": f"Invalid mode. Valid: {list(config['values'].keys())}"}), 400
-    
-    success = ssh_dbus_write(config["service"], config["path"], value, config["type"])
-    
-    if success:
-        return jsonify({"message": f"Successfully set {setting_name} to {value}", "setting": setting_name, "value": value})
+            return jsonify({"error": f"Invalid mode. Valid: {list(config.get('values', {}).keys())}"}), 400
+
+    # Convert value to appropriate type
+    if config["type"] == "int":
+        value = int(value)
+    elif config["type"] == "float":
+        value = float(value)
+
+    # Look up system info
+    systems, _ = load_gx_systems()
+    if not systems:
+        return jsonify({"error": "No GX systems discovered"}), 500
+
+    # Find the target system
+    target = None
+    if system_id:
+        for s in systems:
+            if s.get("system_id") == system_id:
+                target = s
+                break
+        if not target:
+            return jsonify({"error": f"Unknown system_id: {system_id}"}), 400
     else:
-        return jsonify({"error": "Failed to write to D-Bus"}), 500
+        # Default to first system
+        target = systems[0]
+        system_id = target.get("system_id")
+
+    ip = target.get("ip")
+    portal_id = target.get("portal_id")
+
+    if not ip or not portal_id:
+        return jsonify({"error": f"Missing IP or portal_id for {system_id}"}), 500
+
+    # Get vebus instance for this system
+    instance = get_vebus_instance(system_id)
+    if not instance:
+        return jsonify({"error": f"Could not determine vebus instance for {system_id}"}), 500
+
+    # Write via MQTT
+    mqtt_path = config["mqtt_path"]
+    success, message = mqtt_write_setting(ip, portal_id, instance, mqtt_path, value)
+
+    if success:
+        return jsonify({
+            "message": message,
+            "setting": setting_name,
+            "value": value,
+            "system_id": system_id
+        })
+    else:
+        return jsonify({"error": message}), 500
 
 
 # ============================================================================
@@ -6452,6 +6786,14 @@ logger.info("Report upload worker started")
 tile_usage_thread = threading.Thread(target=tile_usage_sync_worker, daemon=True, name="tile-usage-sync")
 tile_usage_thread.start()
 logger.info("Tile usage sync worker started")
+
+# Start MQTT realtime subscriber thread
+if PAHO_AVAILABLE:
+    mqtt_realtime_thread = threading.Thread(target=_mqtt_realtime_worker, daemon=True, name="mqtt-realtime")
+    mqtt_realtime_thread.start()
+    logger.info("MQTT realtime worker started")
+else:
+    logger.warning("paho-mqtt not installed, realtime MQTT updates disabled")
 
 if __name__ == "__main__":
     # Only used for local development: python app.py
