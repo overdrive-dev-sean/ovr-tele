@@ -119,6 +119,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # Override for host networking - can't resolve docker service names
       - VM_QUERY_URL=http://localhost:8428
+      - VM_WRITE_URL=http://localhost:8428/write
     restart: unless-stopped
 
   frontend:

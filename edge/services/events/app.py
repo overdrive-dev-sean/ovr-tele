@@ -2290,6 +2290,34 @@ def _cloud_url(path: str) -> Optional[str]:
     return f"{CLOUD_API_URL.rstrip('/')}{path}"
 
 
+def _create_cloud_event(event_id: str) -> bool:
+    """Create event in cloud registry if it doesn't exist.
+
+    Returns True if event was created or already exists, False on error.
+    """
+    if not event_id or _is_temp_event_id(event_id):
+        return False
+    url = _cloud_url("/api/events")
+    if not url:
+        return False
+    try:
+        resp = requests.post(
+            url,
+            json={"event_name": event_id},
+            timeout=CLOUD_API_TIMEOUT,
+        )
+        # 201 = created, 409 = already exists (both are fine)
+        if resp.status_code in (200, 201, 409):
+            logger.info(f"Cloud event sync: {event_id} (status={resp.status_code})")
+            return True
+        else:
+            logger.warning(f"Cloud event create failed: {resp.status_code} {resp.text[:200]}")
+            return False
+    except Exception as exc:
+        logger.warning(f"Cloud event create failed: {exc}")
+        return False
+
+
 def _post_cloud_event_node(event_id: str, node_id: str) -> None:
     if not event_id or _is_temp_event_id(event_id):
         return
@@ -3112,6 +3140,8 @@ def api_event_start():
         log_audit("event_start", system_id, event_id, location, note, True)
         node_key = NODE_ID or SYSTEM_ID
         if node_key:
+            # Create event in cloud registry (idempotent - ok if already exists)
+            _create_cloud_event(event_id)
             _post_cloud_event_node(event_id, node_key)
         return jsonify({
             "success": True,
