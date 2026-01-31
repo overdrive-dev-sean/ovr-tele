@@ -436,6 +436,12 @@ export default function App() {
   const [reportItems, setReportItems] = useState([]);
   const [reportAggregate, setReportAggregate] = useState(null);
   const [reportMessage, setReportMessage] = useState('');
+  // End event modal state
+  const [endEventModalOpen, setEndEventModalOpen] = useState(false);
+  const [endingEvent, setEndingEvent] = useState(false);
+  // Pending alignments state
+  const [pendingAlignments, setPendingAlignments] = useState([]);
+  const [alignmentsLoading, setAlignmentsLoading] = useState(false);
   const [mapStatus, setMapStatus] = useState(null);
   const [mapProviders, setMapProviders] = useState({
     esri: {
@@ -1167,21 +1173,61 @@ export default function App() {
     await submitCreateEvent(suggested);
   };
 
-  const endEvent = async () => {
+  const openEndEventModal = () => {
     if (!selectedEvent) return;
-    if (!window.confirm('End this event?')) return;
+    setEndEventModalOpen(true);
+  };
+
+  const closeEndEventModal = () => {
+    setEndEventModalOpen(false);
+  };
+
+  const confirmEndEvent = async () => {
+    if (!selectedEvent) return;
+    setEndingEvent(true);
     try {
-      await apiPost(`${API_BASE}/events/${encodeURIComponent(selectedEvent)}/end`);
+      await apiPost(`${API_BASE}/events/${encodeURIComponent(selectedEvent)}/end?broadcast=true`);
       await fetchEvents();
       await fetchRegistryEvents();
       await fetchEventDetail(selectedEvent);
-      setStatusMessage('Event ended.');
+      setStatusMessage('Event ended. Broadcast sent to edge nodes.');
       if (pendingEventId === selectedEvent) {
         setPendingEventId('');
         setPendingEventName('');
       }
+      closeEndEventModal();
     } catch (err) {
       setStatusMessage(err.message || 'Unable to end event.');
+    } finally {
+      setEndingEvent(false);
+    }
+  };
+
+  // Fetch pending alignments
+  const fetchPendingAlignments = async () => {
+    setAlignmentsLoading(true);
+    try {
+      const resp = await fetch(`${API_BASE}/events/pending-alignments`, { cache: 'no-store' });
+      if (!resp.ok) throw new Error('Failed to load alignments');
+      const data = await resp.json();
+      setPendingAlignments(data.alignments || []);
+    } catch (err) {
+      setPendingAlignments([]);
+    } finally {
+      setAlignmentsLoading(false);
+    }
+  };
+
+  // Resolve a pending alignment
+  const resolveAlignment = async (alignmentId, resolution) => {
+    try {
+      await apiPost(`${API_BASE}/events/pending-alignments/${alignmentId}`, { resolution });
+      setStatusMessage(`Alignment ${resolution === 'merge' ? 'merged' : 'kept separate'}.`);
+      await fetchPendingAlignments();
+      await fetchEvents();
+      await fetchRegistryEvents();
+    } catch (err) {
+      setStatusMessage(err.message || 'Unable to resolve alignment.');
     }
   };
 
@@ -1543,6 +1589,12 @@ export default function App() {
   useEffect(() => {
     fetchRegistryEvents();
     const interval = setInterval(fetchRegistryEvents, 300000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    fetchPendingAlignments();
+    const interval = setInterval(fetchPendingAlignments, 60000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1912,7 +1964,7 @@ export default function App() {
           <div className="event-actions">
             <button
               className="btn ghost"
-              onClick={endEvent}
+              onClick={openEndEventModal}
               type="button"
               disabled={!selectedEvent || selectedEventSummary?.status === 'ended'}
             >
@@ -2543,6 +2595,66 @@ export default function App() {
             </button>
           </div>
         ) : null}
+
+        {/* End Event Confirmation Modal */}
+        {endEventModalOpen && (
+          <div className="modal-overlay" onClick={closeEndEventModal}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <h3>End Event</h3>
+              <p>
+                <strong>{eventLabelForId(selectedEvent) || selectedEvent}</strong>
+              </p>
+              <p>This will broadcast an end signal to all participating edge nodes.</p>
+              <div className="modal-section">
+                <strong>Affected Nodes ({selectedEventDetail?.nodes?.length || 0}):</strong>
+                {selectedEventDetail?.nodes?.length > 0 ? (
+                  <ul className="affected-nodes-list">
+                    {selectedEventDetail.nodes.map((node) => (
+                      <li key={node.node_id}>
+                        {node.node_id}
+                        {node.ended_at ? ' (already ended)' : ''}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="no-nodes">No nodes currently participating.</p>
+                )}
+              </div>
+              <div className="modal-actions">
+                <button className="btn ghost" onClick={closeEndEventModal} disabled={endingEvent}>
+                  Cancel
+                </button>
+                <button className="btn primary" onClick={confirmEndEvent} disabled={endingEvent}>
+                  {endingEvent ? 'Ending...' : 'End Event'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Pending Alignments Notification */}
+        {pendingAlignments.length > 0 && (
+          <div className="pending-alignments-banner">
+            <strong>Possible Duplicate Events ({pendingAlignments.length})</strong>
+            <div className="alignments-list">
+              {pendingAlignments.slice(0, 3).map((a) => (
+                <div key={a.id} className="alignment-item">
+                  <span className="alignment-text">
+                    {a.node_id}: &quot;{a.local_event_id}&quot; → &quot;{a.canonical_event_name}&quot; ({a.similarity}%)
+                  </span>
+                  <div className="alignment-actions">
+                    <button className="btn-small" onClick={() => resolveAlignment(a.id, 'merge')}>
+                      Merge
+                    </button>
+                    <button className="btn-small ghost" onClick={() => resolveAlignment(a.id, 'keep_separate')}>
+                      Keep Separate
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

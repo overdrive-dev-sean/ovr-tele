@@ -2792,7 +2792,7 @@ def _mqtt_local_publish_worker() -> None:
 # ============================================================================
 
 def _on_registry_message(client, userdata, msg) -> None:
-    """Handle incoming registry messages from cloud."""
+    """Handle incoming registry and event broadcast messages from cloud."""
     try:
         payload = json.loads(msg.payload.decode("utf-8"))
         topic = msg.topic
@@ -2802,15 +2802,118 @@ def _on_registry_message(client, userdata, msg) -> None:
                 _cloud_registry_cache["events"] = payload.get("events", [])
                 _cloud_registry_cache["ts"] = payload.get("ts", int(time.time() * 1000))
             logger.info(f"Received cloud registry: {len(_cloud_registry_cache['events'])} events")
+
+        # Handle event-end broadcast from cloud
+        elif topic.startswith("ovr/events/") and topic.endswith("/end"):
+            _handle_event_end_broadcast(payload)
+
+        # Handle event alignment notification from cloud
+        elif "/align" in topic:
+            _handle_event_alignment(payload)
+
     except Exception as e:
-        logger.warning(f"Failed to parse registry message: {e}")
+        logger.warning(f"Failed to parse registry/event message: {e}")
+
+
+def _handle_event_end_broadcast(payload: Dict[str, Any]) -> None:
+    """Handle event-end broadcast from cloud. Ends local participation and generates report."""
+    event_id = payload.get("event_id")
+    if not event_id:
+        logger.warning("Event-end broadcast missing event_id")
+        return
+
+    logger.info(f"Received event-end broadcast for event_id={event_id}")
+
+    # Check if this node has active loggers for this event
+    with get_db() as conn:
+        loggers = conn.execute(
+            "SELECT system_id, location FROM active_events WHERE event_id = ?",
+            (event_id,)
+        ).fetchall()
+
+    if not loggers:
+        logger.info(f"No active loggers for event {event_id}, ignoring broadcast")
+        return
+
+    logger.info(f"Ending {len(loggers)} loggers for event {event_id} via broadcast")
+
+    # Write active=0 to VM for each logger
+    ts = int(time.time() * 1e9)
+    lines = []
+    for row in loggers:
+        system_id = row["system_id"]
+        location = row["location"] or "-"
+        line = build_event_line(event_id, system_id, location, 0, ts)
+        lines.append(line)
+
+    if lines:
+        success, error = write_to_vm(lines)
+        if not success:
+            logger.error(f"Failed to write event end to VM: {error}")
+            return
+
+    # Remove from active_events
+    with get_db() as conn:
+        conn.execute("DELETE FROM active_events WHERE event_id = ?", (event_id,))
+        conn.commit()
+
+    log_audit("event_end_broadcast", "-", event_id, success=True)
+
+    # Generate and upload report in background (JSON only)
+    def generate_report_background():
+        try:
+            logger.info(f"Auto-generating report for broadcast-ended event_id={event_id}")
+            report_result = generate_event_report(event_id)
+            if "error" in report_result:
+                logger.error(f"Report generation failed: {report_result['error']}")
+            else:
+                logger.info(f"Report generated: {report_result.get('html_file', 'N/A')}")
+                json_path = report_result.get("json_file")
+                if json_path:
+                    try:
+                        with open(json_path, "r") as handle:
+                            report_data = json.load(handle)
+                        # Upload JSON only - cloud will render HTML when needed
+                        _upload_report_json(report_data, report_html=None)
+                    except Exception as exc:
+                        logger.warning(f"Report upload failed: {exc}")
+        except Exception as e:
+            logger.error(f"Report generation exception: {e}")
+
+    thread = threading.Thread(target=generate_report_background, daemon=True)
+    thread.start()
+
+
+def _handle_event_alignment(payload: Dict[str, Any]) -> None:
+    """Handle event alignment notification from cloud."""
+    local_id = payload.get("local_event_id")
+    canonical_id = payload.get("canonical_event_id")
+    canonical_name = payload.get("canonical_name")
+
+    if not local_id or not canonical_id:
+        return
+
+    logger.info(f"Event aligned: '{local_id}' -> '{canonical_name}' ({canonical_id})")
+
+    # Update local active_events to use canonical event_id
+    with get_db() as conn:
+        updated = conn.execute(
+            "UPDATE active_events SET event_id = ? WHERE event_id = ?",
+            (canonical_id, local_id)
+        ).rowcount
+        conn.commit()
+
+    if updated > 0:
+        logger.info(f"Updated {updated} active_events from '{local_id}' to '{canonical_id}'")
 
 
 def _mqtt_registry_subscriber_worker() -> None:
-    """Background worker that subscribes to cloud registry updates via MQTT.
+    """Background worker that subscribes to cloud registry and event broadcasts via MQTT.
 
-    Cloud publishes event list to ovr/registry/events, bridged to local broker.
-    This populates the event dropdown on edge nodes.
+    Cloud publishes:
+    - ovr/registry/events: event list for dropdown
+    - ovr/events/{event_id}/end: event end broadcast
+    - ovr/events/{node_id}/align: event alignment notification
     """
     if not PAHO_AVAILABLE:
         logger.warning("paho-mqtt not available, registry subscriber disabled")
@@ -2824,8 +2927,9 @@ def _mqtt_registry_subscriber_worker() -> None:
                 client.on_message = _on_registry_message
                 client.connect(LOCAL_MQTT_BROKER, LOCAL_MQTT_PORT, keepalive=60)
                 client.subscribe("ovr/registry/#", qos=1)
+                client.subscribe("ovr/events/#", qos=1)
                 client.loop_start()
-                logger.info("Registry subscriber connected, waiting for cloud events")
+                logger.info("Registry/events subscriber connected, waiting for cloud messages")
 
             _heartbeat_stop.wait(30)
 

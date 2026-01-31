@@ -308,7 +308,7 @@ When working in tandem:
   ```
 
 ### Cloud Claude
-- **Working on:** MQTT subscriber for edge node communication ✓
+- **Working on:** Broadcast event end + fuzzy matching ✓
 - **Blocked by:** (nothing)
 - **Notes:**
   - ✅ Remote write confirmed - receiving metrics
@@ -325,6 +325,17 @@ When working in tandem:
     - Subscribes to `ovr/+/reports` → saves reports to filesystem
     - Publishes to `ovr/registry/events` when event list changes
     - Uses `ovr-api` user with devpassword123 (change in prod!)
+  - ✅ **Broadcast Event End** feature:
+    - Fleet Map "End Event" button opens confirmation modal showing affected nodes
+    - POST `/api/events/{id}/end?broadcast=true` publishes to `ovr/events/{id}/end`
+    - Edge nodes receive broadcast, end locally, generate reports (JSON only)
+    - Reports uploaded via `ovr/<node_id>/reports` MQTT topic
+  - ✅ **Fuzzy Event Alignment** feature:
+    - Cloud detects mistyped event names using rapidfuzz (80%+ similarity)
+    - 90%+ similarity: auto-merge, publish alignment notification to edge
+    - 80-90%: queue for review in Fleet Map UI
+    - Pending alignments banner shows merge/keep-separate options
+    - Edge handles alignment notifications, updates local event_id
 
 **API Response Format** (`/api/nodes`):
 ```json
@@ -520,6 +531,12 @@ curl -s localhost:8428/api/v1/query?query=up | jq
 ## Files Changed Recently
 
 ```
+2026-01-31: cloud/services/api/app.py (broadcast event end, fuzzy matching, pending alignments)
+2026-01-31: cloud/services/api/requirements.txt (added rapidfuzz)
+2026-01-31: cloud/services/map/src/App.jsx (end event modal, pending alignments banner)
+2026-01-31: cloud/services/map/src/styles.css (modal and alignment styles)
+2026-01-31: edge/services/events/app.py (event-end broadcast handler, alignment handler)
+2026-01-31: edge/mosquitto/mosquitto.conf (added ovr/events/# inbound topic)
 2026-01-31: cloud/services/api/app.py (MQTT subscriber for auto-event creation, report storage, registry publish)
 2026-01-31: cloud/services/api/requirements.txt (added paho-mqtt)
 2026-01-31: cloud/compose.dev.yml (API depends on mqtt, MQTT env vars)

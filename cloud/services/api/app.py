@@ -23,6 +23,12 @@ try:
 except ImportError:
     PAHO_AVAILABLE = False
 
+try:
+    from rapidfuzz import fuzz, process as fuzz_process
+    RAPIDFUZZ_AVAILABLE = True
+except ImportError:
+    RAPIDFUZZ_AVAILABLE = False
+
 from map_tiles import (
     PROVIDERS as MAP_TILE_PROVIDERS,
     utc_month_key,
@@ -178,6 +184,19 @@ CREATE TABLE IF NOT EXISTS event_aliases (
   PRIMARY KEY (event_id, node_id, temp_event_id)
 );
 CREATE INDEX IF NOT EXISTS idx_event_aliases_temp ON event_aliases (temp_event_id);
+CREATE TABLE IF NOT EXISTS pending_alignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id TEXT NOT NULL,
+  local_event_id TEXT NOT NULL,
+  canonical_event_id TEXT NOT NULL,
+  canonical_event_name TEXT NOT NULL,
+  similarity INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER,
+  resolution TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_alignments_unresolved
+  ON pending_alignments (resolved_at) WHERE resolved_at IS NULL;
 """
 
 
@@ -615,6 +634,126 @@ def _trigger_registry_publish() -> None:
     _registry_publish_pending.set()
 
 
+def _publish_event_end_broadcast(event_id: str, event_name: str, nodes: List[Dict[str, Any]]) -> None:
+    """Broadcast event end to all edge nodes participating in this event."""
+    if not PAHO_AVAILABLE or _mqtt_client is None:
+        logger.warning("Cannot broadcast event end: MQTT client not available")
+        return
+    try:
+        payload = {
+            "action": "end",
+            "event_id": event_id,
+            "event_name": event_name,
+            "ended_at": int(time.time()),
+            "nodes": [
+                {"node_id": n.get("node_id"), "system_id": n.get("system_id")}
+                for n in nodes if n.get("node_id")
+            ],
+            "ts": int(time.time() * 1000)
+        }
+        topic = f"ovr/events/{event_id}/end"
+        result = _mqtt_client.publish(topic, json.dumps(payload), qos=1)
+        if result.rc == 0:
+            logger.info(f"Broadcast event end: {event_id} to {len(nodes)} nodes")
+        else:
+            logger.warning(f"Failed to broadcast event end: rc={result.rc}")
+    except Exception as exc:
+        logger.warning(f"Event end broadcast failed: {exc}")
+
+
+def _publish_event_alignment(node_id: str, local_event_id: str, canonical_event_id: str, canonical_name: str) -> None:
+    """Notify edge node that its event was aligned to canonical event."""
+    if not PAHO_AVAILABLE or _mqtt_client is None:
+        return
+    try:
+        payload = {
+            "action": "align",
+            "local_event_id": local_event_id,
+            "canonical_event_id": canonical_event_id,
+            "canonical_name": canonical_name,
+            "ts": int(time.time() * 1000)
+        }
+        topic = f"ovr/events/{node_id}/align"
+        result = _mqtt_client.publish(topic, json.dumps(payload), qos=1)
+        if result.rc == 0:
+            logger.info(f"Published event alignment: {local_event_id} -> {canonical_name} for {node_id}")
+    except Exception as exc:
+        logger.warning(f"Event alignment publish failed: {exc}")
+
+
+def _find_similar_events(name: str, threshold: int = 80) -> List[Dict[str, Any]]:
+    """Find events with similar names using fuzzy matching."""
+    if not name or not RAPIDFUZZ_AVAILABLE:
+        return []
+
+    normalized = _normalize_event_name(name)
+    with _get_db() as conn:
+        events = conn.execute(
+            "SELECT event_id, event_name, event_name_norm FROM events_registry WHERE ended_at IS NULL"
+        ).fetchall()
+
+    if not events:
+        return []
+
+    choices = {e["event_id"]: e["event_name_norm"] for e in events}
+    matches = fuzz_process.extract(normalized, choices, scorer=fuzz.ratio, limit=5)
+
+    results = []
+    for match in matches:
+        event_id, score = match[0], match[1]
+        if score >= threshold:
+            event = next((e for e in events if e["event_id"] == event_id), None)
+            if event:
+                results.append({
+                    "event_id": event_id,
+                    "event_name": event["event_name"],
+                    "similarity": int(score)
+                })
+    return results
+
+
+def _queue_pending_alignment(node_id: str, local_event_id: str, match: Dict[str, Any]) -> None:
+    """Queue a pending alignment for review."""
+    with _get_db() as conn:
+        conn.execute(
+            """INSERT INTO pending_alignments
+               (node_id, local_event_id, canonical_event_id, canonical_event_name, similarity, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (node_id, local_event_id, match["event_id"], match["event_name"], match["similarity"], int(time.time()))
+        )
+        conn.commit()
+    logger.info(f"Queued alignment for review: {local_event_id} -> {match['event_name']} ({match['similarity']}%)")
+
+
+def _get_pending_alignments() -> List[Dict[str, Any]]:
+    """Get all pending alignments awaiting review."""
+    with _get_db() as conn:
+        rows = conn.execute(
+            """SELECT id, node_id, local_event_id, canonical_event_id, canonical_event_name, similarity, created_at
+               FROM pending_alignments WHERE resolved_at IS NULL ORDER BY created_at DESC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _resolve_pending_alignment(alignment_id: int, resolution: str) -> bool:
+    """Resolve a pending alignment (merge or keep_separate)."""
+    with _get_db() as conn:
+        row = conn.execute("SELECT * FROM pending_alignments WHERE id = ?", (alignment_id,)).fetchone()
+        if not row:
+            return False
+
+        if resolution == "merge":
+            _add_event_alias(row["canonical_event_id"], row["node_id"], row["local_event_id"])
+            _publish_event_alignment(row["node_id"], row["local_event_id"], row["canonical_event_id"], row["canonical_event_name"])
+
+        conn.execute(
+            "UPDATE pending_alignments SET resolved_at = ?, resolution = ? WHERE id = ?",
+            (int(time.time()), resolution, alignment_id)
+        )
+        conn.commit()
+    return True
+
+
 def _on_mqtt_connect(client, userdata, flags, reason_code, properties=None) -> None:
     """Handle MQTT connection."""
     if reason_code == 0:
@@ -662,6 +801,7 @@ def _handle_realtime_message(node_id: str, payload: Dict[str, Any]) -> None:
     """Process realtime message from edge node.
 
     Auto-creates events when event_id is present.
+    Uses fuzzy matching to detect and align mistyped event names.
     """
     event_id = payload.get("event_id")
     if not event_id:
@@ -671,8 +811,30 @@ def _handle_realtime_message(node_id: str, payload: Dict[str, Any]) -> None:
     if event_id in PLACEHOLDER_NODE_IDS or not event_id.strip():
         return
 
-    # Try to create or find the event (event_id is the event name from edge)
-    created, existing = _create_event_registry_entry(event_id, started_at=None)
+    # Check if exact match exists (by normalized name)
+    existing = _get_event_registry_by_norm(_normalize_event_name(event_id))
+    if existing:
+        # Exact match - nothing to do
+        return
+
+    # Check for fuzzy matches (potential typos)
+    similar = _find_similar_events(event_id, threshold=80)
+    if similar:
+        best_match = similar[0]
+        if best_match["similarity"] >= 90:
+            # Auto-merge: very high confidence (90%+)
+            _add_event_alias(best_match["event_id"], node_id, event_id)
+            logger.info(f"Auto-merged '{event_id}' -> '{best_match['event_name']}' (similarity={best_match['similarity']}%)")
+            _publish_event_alignment(node_id, event_id, best_match["event_id"], best_match["event_name"])
+            _trigger_registry_publish()
+            return
+        else:
+            # Queue for review: moderate confidence (80-90%)
+            _queue_pending_alignment(node_id, event_id, best_match)
+            # Create event temporarily (will be merged after review)
+
+    # No match or moderate match - create new event
+    created, _ = _create_event_registry_entry(event_id, started_at=None)
     if created:
         logger.info(f"Auto-created event from MQTT: {event_id} (node: {node_id})")
         _trigger_registry_publish()
@@ -3580,6 +3742,8 @@ def api_event_detail(event_id: str) -> Any:
 
 @app.route("/api/events/<event_id>/end", methods=["POST"])
 def api_event_end(event_id: str) -> Any:
+    broadcast = request.args.get("broadcast", "").lower() in ("true", "1", "yes")
+
     resolved = _resolve_event_registry(event_id)
     resolved_id = resolved["event_id"] if resolved else event_id
     event = _get_event_registry(resolved_id)
@@ -3620,6 +3784,13 @@ def api_event_end(event_id: str) -> Any:
             return jsonify({"error": "vm_write_failed", "detail": error}), 502
     _end_event_registry(resolved_id, ended_at)
     _mark_legacy_event_ended(resolved_id, ended_at)
+
+    # Broadcast event end to all edge nodes if requested
+    if broadcast:
+        _publish_event_end_broadcast(resolved_id, event.get("event_name") or resolved_id, nodes)
+
+    _trigger_registry_publish()
+
     event["ended_at"] = ended_at
     payload = {
         "event_id": event["event_id"],
@@ -3629,6 +3800,7 @@ def api_event_end(event_id: str) -> Any:
         "started_at": event["started_at"],
         "ended_at": event["ended_at"],
         "status": "ended",
+        "broadcast": broadcast,
     }
     return jsonify(payload)
 
@@ -3757,6 +3929,28 @@ def api_event_aliases(event_id: str) -> Any:
             "merged_reports": merged.get("merged", 0),
         }
     )
+
+
+@app.route("/api/events/pending-alignments", methods=["GET"])
+def api_pending_alignments() -> Any:
+    """Get all pending event alignments awaiting review."""
+    alignments = _get_pending_alignments()
+    return jsonify({"alignments": alignments, "count": len(alignments)})
+
+
+@app.route("/api/events/pending-alignments/<int:alignment_id>", methods=["POST"])
+def api_resolve_alignment(alignment_id: int) -> Any:
+    """Resolve a pending alignment (merge or keep_separate)."""
+    payload = request.get_json(silent=True) or {}
+    resolution = str(payload.get("resolution", "")).strip().lower()
+    if resolution not in ("merge", "keep_separate"):
+        return jsonify({"error": "resolution must be 'merge' or 'keep_separate'"}), 400
+
+    success = _resolve_pending_alignment(alignment_id, resolution)
+    if not success:
+        return jsonify({"error": "alignment not found"}), 404
+
+    return jsonify({"id": alignment_id, "resolution": resolution, "resolved": True})
 
 
 @app.route("/api/reports", methods=["GET"])
