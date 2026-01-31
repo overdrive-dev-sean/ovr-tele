@@ -61,6 +61,94 @@ Reports are generated **automatically and immediately**:
 | **Edge dashboard** | Field techs, operations (real-time monitoring) |
 | **Grafana** | Everyone (different dashboards for different roles) |
 
+## Data Model
+
+### Entity Hierarchy
+
+```
+Deployment (fleet owner)
+    └── Event (a job/engagement, 1 day to 1+ month)
+            └── Node (edge N100 at a location)
+                    └── System (GX, ACUVIM, etc. - the actual data source)
+```
+
+### Key Concepts
+
+| Entity | Description | Example |
+|--------|-------------|---------|
+| **Deployment** | Fleet owner/manager | "Overdrive", "RoboticsCompanyRental" |
+| **Event** | A specific job with start/end | "Coachella2026", "DisasterReliefTX" |
+| **Node** | Edge N100 device | "node-04", "n100-stage-left" |
+| **System** | Individual monitored asset | "bess-01", "acuvim-transformer-a" |
+
+### Relationships
+
+- **Nodes and systems float freely** - not permanently tied to anything
+- A system connects to whichever node is physically nearby
+- A node participates in whichever event it's commissioned for
+- Same equipment moves from event to event throughout the year
+- Eventually every system may have a built-in node, but not yet
+
+### Fleet Map Filtering
+
+```
+Deployment (filter first)
+    → Events (can have multiple concurrent events, or see whole fleet)
+        → Nodes
+            → Systems
+```
+
+## Event & Commissioning Workflow
+
+### Event Lifecycle
+
+1. **Event Created** - By ops in advance (for consistency) or by first field tech on-site
+2. **Nodes Commission** - Each node joins the event, adds systems
+3. **Event Active** - Logging, monitoring, real-time dashboards
+4. **Systems End** - Individual systems can end participation (generates per-system report)
+5. **Event Ends** - Aggregate report generated, data preserved on cloud
+
+Events can last **1 day to 1+ month**.
+
+### Node Commissioning Flow (on edge dashboard)
+
+```
+1. Choose/create event name
+   - If event exists → select from dropdown (auto-populated from cloud)
+   - If no events → create new name (first node defines it)
+   - If offline → create temp name (can be merged later)
+
+2. Add at least one system_id
+   - Select from dropdown (ideally auto-discovered)
+   - GX, ACUVIM, or other data source
+
+3. Set location tag for the system
+   - e.g., "Stage Left", "Generator A", "Main Transformer"
+
+4. Add more systems as needed (now or later)
+
+5. Add notes and photos
+   - Node-level notes (about the deployment location)
+   - System-level notes (about specific equipment)
+```
+
+**Key design principle:** Works entirely offline. Edge dashboard lives on the edge node - no internet required to commission and start logging.
+
+### Cloud's Role
+
+- **Fleet map** - Overview of all events, all nodes, all systems
+- **Real-time aggregation** - As much live data as connectivity allows
+- **Long-term storage** - Downsampled data so edges can start fresh after 6+ months
+- **Event coordination** - Manage overall event start/stop, sync with first node
+- **Preserve artifacts** - Collect notes, photos, reports from nodes before they go offline
+
+### Offline/Merge Scenarios
+
+If a node commissions offline with a temp event name:
+- Data logs locally under temp name
+- When connectivity restored, temp event can be merged into the real event
+- Reports and data get re-associated
+
 ## Key Technologies
 
 - **VictoriaMetrics** - Time series database (Prometheus-compatible, handles high cardinality)
