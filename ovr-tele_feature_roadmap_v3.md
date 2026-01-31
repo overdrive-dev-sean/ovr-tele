@@ -6,26 +6,41 @@ It assumes your current "mostly working refactor" is living on an integration br
 
 ## Status overview (2026-01-31)
 
+### Core Pipeline (Done)
+
 | Milestone | Status | Notes |
 |-----------|--------|-------|
 | 0 - Env layout + symlinks | ✅ Done | `/etc/ovr/` canonical, symlinks in place |
-| 0.5 - Smoke scripts | ⬜ Not started | |
-| 1 - Phase 0 networking | ⬜ Not started | |
-| 2 - Peers + mesh proxy | ⬜ Not started | |
-| 3 - MQTT broker foundation | ✅ Done | Internal Mosquitto broker, no host ports |
-| 4 - MQTT summary plane | ✅ Done | `/api/realtime` with GX MQTT subscription |
-| 4b - MQTT control plane | ✅ Done | MQTT-based GX control via `mosquitto_pub` |
-| 4f - GX Control UX | ✅ Done | Realtime settings, optimistic UI, MQTT confirmation |
-| 4c - GX MQTT via Telegraf | ✅ Done | Starlark processor, dynamic config gen |
-| 4d - GX discovery automation | ✅ Done | Allowlist-based (not mDNS), `refresh_gx_mqtt_sources.sh` |
-| 4e - GX MQTT keepalive | ✅ Done | Integrated into refresh script, 50s timer |
-| 5 - PWA service worker | ⬜ Not started | |
-| 6 - Unified PWA beta | ⬜ Not started | |
-| 7 - PWA cutover | ⬜ Not started | |
-| 8 - Mesh transport | ⬜ Not started | |
+| 3 - MQTT broker foundation | ✅ Done | Internal Mosquitto + cloud bridge |
+| 4 - MQTT summary plane | ✅ Done | `/api/realtime` with GX + ACUVIM |
+| 4b - MQTT control plane | ✅ Done | MQTT-based GX control |
+| 4c - GX MQTT via Telegraf | ✅ Done | Starlark processor, dynamic config |
+| 4d - GX discovery automation | ✅ Done | Allowlist-based, `refresh_gx_mqtt_sources.sh` |
+| 4e - GX MQTT keepalive | ✅ Done | Integrated into refresh script |
+| 4f - GX Control UX | ✅ Done | Optimistic UI, MQTT confirmation |
 
-> Core principle: **Do not ship a giant refactor all at once.**  
-> We add capability in layers: host layout → Phase‑0 networking → safe peer proxy → MQTT summary/control → GX ingestion → unified PWA beta → cutover.
+### Multi-Node / Unified UI (Not Started)
+
+These form one cohesive package for multi-node field deployments:
+
+| Phase | Milestone | Status | What |
+|-------|-----------|--------|------|
+| A | 2 - Peers + mesh proxy | ⬜ | Node-to-node query routing |
+| B | 6 - Unified PWA | ⬜ | Single UI for edge + cloud (includes service worker) |
+| C | 7 - Cutover | ⬜ | Make unified UI default |
+| D | 8 - Mesh transport | ⬜ | Nebula/Babel for robust routing |
+
+A and B can happen in parallel. C needs B tested. D can happen anytime after A.
+
+### Optional / Lower Priority
+
+| Milestone | Status | Notes |
+|-----------|--------|-------|
+| 0.5 - Smoke scripts | ⬜ | Health check scripts |
+| 1 - Phase 0 networking | ⬜ | Multi-SSID, mDNS (nice-to-have) |
+
+> Core principle: **Do not ship a giant refactor all at once.**
+> We add capability in layers: core pipeline (done) → peer proxy → unified PWA → cutover → mesh hardening.
 
 ---
 
@@ -121,24 +136,61 @@ For each milestone:
 
 ---
 
-## Milestone 2 — Static peer list + safe “mesh proxy” (VM queries)
+# Multi-Node / Unified UI Package (Milestones 2, 6, 7, 8)
+
+**The Goal:** One UI that works everywhere—on your phone at a 10-node field site, or from HQ looking at the whole fleet.
+
+**The Problem:** At large events, you have multiple edge nodes spread across a site. Each has its own data. A field tech connected to one node wants to see data from *all* nodes without:
+- Every node needing internet
+- Browser making direct connections to every node
+- Hammering bandwidth across flaky Wi-Fi/mesh links
+
+**The Solution:** Node-to-node proxy + unified UI + optional mesh hardening.
+
+```
+Phone/Tablet
+     │
+     ▼ (connects to nearest node only)
+┌─────────────┐
+│   Node A    │◄── You're here
+│  (proxy)    │
+└─────┬───────┘
+      │ /api/peers/node-b/vm/query?...
+      ▼
+┌─────────────┐     ┌─────────────┐
+│   Node B    │     │   Node C    │
+│  (has data) │     │  (has data) │
+└─────────────┘     └─────────────┘
+```
+
+**Build Order:**
+| Phase | Milestone | What | Can Start |
+|-------|-----------|------|-----------|
+| A | 2 | Peer proxy | Now |
+| B | 6 | Unified PWA | After A (or parallel) |
+| C | 7 | Cutover | After B tested |
+| D | 8 | Mesh transport | After A works on Wi-Fi |
+
+---
+
+## Milestone 2 — Peers + Mesh Proxy (Phase A of Multi-Node)
 **Branch:** `feat/2-peers-and-mesh-proxy`
 
 ### What
-- Define `/etc/ovr/peers.json` (static list).
-- Provide `GET /api/peers` from the edge API.
-- Edge nginx proxies:
+- `/etc/ovr/peers.json` — static peer list (who's on this site)
+- `GET /api/peers` — expose peer list to UI
+- Proxy routes in nginx:
   - `/api/vm/*` → local VictoriaMetrics (`:8428`)
-  - `/api/peers/<peer_id>/vm/*` → peer VictoriaMetrics (`<peer_host>:8428`) via whitelist map (no SSRF)
-- Minimal “Peer Test” UI page (no charts).
+  - `/api/peers/<peer_id>/vm/*` → that peer's VictoriaMetrics (whitelist only, no SSRF)
+- Minimal "Peer Test" UI page (no charts, just verify connectivity)
 
 ### Why
-- This is the core low-bandwidth data path: **UI talks to local node only**, node routes requests.
+This is the plumbing. Without it, UI can't get data from other nodes. The key insight: **UI talks to one node only, that node proxies everything else.**
 
 ### Acceptance
 - Local VM query works via `/api/vm/...`
 - Peer VM query works via `/api/peers/<id>/vm/...`
-- Unknown peer_id returns 404 (safe).
+- Unknown peer_id returns 404 (safe)
 
 ---
 
@@ -285,68 +337,65 @@ For each milestone:
 
 ---
 
-## Milestone 5 — PWA service worker: cache the app shell
-**Branch:** `feat/5-pwa-app-shell-cache`
+## Milestone 6 — Unified PWA (Phase B of Multi-Node)
+**Branch:** `feat/6-unified-pwa`
+**Depends on:** Milestone 2 (peer proxy)
+
+> *Note: Old Milestone 5 (PWA service worker) is folded into this. Service worker caching only matters once you have a unified UI.*
 
 ### What
-- Register service worker.
-- Cache app shell assets (JS/CSS/icons) so UI downloads once.
-- Preserve map tile caching behavior.
+- Create shared UI package (`web/unified-pwa/`) deployed at `/beta` initially
+- **Service worker** for offline shell + asset caching
+- `/api/capabilities` endpoint for runtime feature detection (am I edge or cloud?)
+- UI logic adapts based on context:
+  - **Edge:** `/api/peers` + `/api/peers/<id>/vm/...` + `/api/realtime`
+  - **Cloud:** `/api/nodes` + MQTT WebSocket for fleet view
+- Same components, different data sources
+- Keep legacy UIs at current paths during beta
 
 ### Why
-- Solves the “UI assets crossing mesh” problem even before full UI unification.
+- One UI for field techs (multi-node on-site) and ops (fleet view from HQ)
+- Cached shell means UI survives brief disconnects on flaky mesh
+- Safe field testing at `/beta` before cutover
 
 ### Acceptance
-- After first load, UI loads offline (shell).
-- Navigating doesn’t re-download bundles.
+- `/beta` works on both edge and cloud
+- Service worker caches shell; subsequent loads are instant/offline-capable
+- Legacy UIs still work at original paths
+- UI correctly detects edge vs cloud and adjusts data fetching
 
 ---
 
-## Milestone 6 — Unified PWA as `/beta` (parallel deployment)
-**Branch:** `feat/6-unified-pwa-beta`
-
-### What
-- Create a new shared UI package (e.g., `web/unified-pwa/`) and deploy it under `/beta`.
-- Add `/api/capabilities` on edge + cloud for runtime feature flags.
-- Beta UI uses:
-  - `/api/peers` for peer list
-  - `/api/peers/<id>/vm/...` for history queries
-  - `/api/realtime` for low-cost live view
-- Keep legacy UI untouched.
-
-### Why
-- Safe field testing without risking the “main” UI.
-
-### Acceptance
-- `/beta` works on edge and cloud.
-- Legacy UIs still work.
-
----
-
-## Milestone 7 — Cutover unified PWA as default (keep rollback)
+## Milestone 7 — Cutover (Phase C of Multi-Node)
 **Branch:** `feat/7-unified-pwa-cutover`
+**Depends on:** Milestone 6 tested in field
 
 ### What
-- Make unified PWA the default UI.
-- Keep legacy UI reachable at `/legacy` for at least one release.
+- Make unified PWA the default at `/`
+- Move legacy UIs to `/legacy` (rollback path for one release)
 
 ### Acceptance
-- Default works on mobile + desktop.
-- `/legacy` exists as rollback path.
+- Default works on mobile + desktop
+- `/legacy` exists as rollback path
 
 ---
 
-## Milestone 8 — Mesh transport upgrades (later)
+## Milestone 8 — Mesh Transport (Phase D of Multi-Node)
 **Branch:** `feat/8-mesh-underlay-overlay`
+**Depends on:** Milestone 2 working on basic Wi-Fi
 
 ### What
-- Underlay: routed interfaces only (no L2 bridging).
-- Babeld routing for lossy links.
-- Nebula overlay addressing (example scheme: `10.231.<site>.<node>`).
+- **Babeld** — routing protocol for lossy wireless links
+- **Nebula** — overlay network with predictable addressing (`10.231.<site>.<node>`)
+- **No L2 bridging** — routed only (prevents broadcast storms on mesh)
 
 ### Why
-- Stabilizes routing across HaLow noise and weird upstream subnets.
-- Peer list host fields can transition from LAN IPs → Nebula IPs without PWA changes.
+- Stabilizes routing across HaLow noise and weird upstream subnets
+- Peer list transitions from LAN IPs → Nebula IPs without UI changes
+- The proxy layer (M2) is transport-agnostic, so hardening transport is independent
+
+### When
+Can start anytime after Milestone 2 works on basic Wi-Fi. Doesn't block PWA work.
 
 ---
 
