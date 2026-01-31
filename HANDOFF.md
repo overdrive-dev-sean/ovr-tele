@@ -243,12 +243,15 @@ When working in tandem:
   - ✅ Stream aggregation producing :10s_avg metrics
   - ✅ Cloud remote write working
   - ✅ MQTT bridge CONNECTED to cloud
-  - ✅ Realtime data flowing (`ovr/n100-01/realtime`)
+  - ✅ Realtime data flowing (`ovr/node-04/realtime`)
+  - ✅ Fixed NODE_ID: now `node-04` (was `n100-01`)
+  - ✅ Removed SYSTEM_ID from edge.env (no longer used)
+  - ✅ Removed SYSTEM_ID from bootstrap templates
 
   Bridge logs confirm:
   ```
   Received CONNACK on connection local.node-04.cloud-bridge
-  Sending PUBLISH to local.node-04.cloud-bridge (ovr/n100-01/realtime)
+  Sending PUBLISH to local.node-04.cloud-bridge (ovr/node-04/realtime)
   Received PUBACK from local.node-04.cloud-bridge
   ```
 
@@ -280,8 +283,11 @@ When working in tandem:
 }
 ```
 
-**Waiting on Edge:**
-- Update `node_id` label from "n100-01" to "node-04"
+**Edge Update (2026-01-31):**
+- ✅ `NODE_ID` changed to `node-04` in edge.env
+- ✅ `SYSTEM_ID` removed entirely (system_id now comes from per-metric tags only)
+- ✅ Bootstrap templates updated to remove SYSTEM_ID
+- ✅ Services restarted - metrics now flow with correct `node_id=node-04` label
 
 **Remote Write Details for Edge:**
 ```

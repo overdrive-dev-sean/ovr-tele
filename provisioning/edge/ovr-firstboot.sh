@@ -953,9 +953,6 @@ run_bootstrap() {
     if [ -n "${NODE_ID:-}" ]; then
       args+=(--node-id "$NODE_ID")
     fi
-    if [ -n "${SYSTEM_ID:-}" ]; then
-      args+=(--system-id "$SYSTEM_ID")
-    fi
     if [ -n "${HOSTNAME_SET:-}" ]; then
       args+=(--hostname "$HOSTNAME_SET")
     fi

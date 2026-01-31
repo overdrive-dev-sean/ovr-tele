@@ -7,7 +7,6 @@ OVR_DIR="${OVR_DIR:-/etc/ovr}"
 
 DEPLOYMENT_ID=""
 NODE_ID=""
-SYSTEM_ID=""
 BASE_DOMAIN=""
 DEPLOY_MODE=""
 
@@ -137,7 +136,6 @@ parse_args() {
     case "$1" in
       --deployment-id) DEPLOYMENT_ID="$2"; shift 2 ;;
       --node-id) NODE_ID="$2"; shift 2 ;;
-      --system-id) SYSTEM_ID="$2"; shift 2 ;;
       --base-domain) BASE_DOMAIN="$2"; shift 2 ;;
       --hostname) HOSTNAME_SET="$2"; shift 2 ;;
       --lan-mode) LAN_MODE="$2"; shift 2 ;;
@@ -191,7 +189,6 @@ parse_targets_inline() {
 load_existing_defaults() {
   local existing_env="${OVR_DIR}/edge.env"
   if [ -f "${existing_env}" ]; then
-    preserve_if_empty SYSTEM_ID SYSTEM_ID "${existing_env}"
     preserve_if_empty BASE_DOMAIN BASE_DOMAIN "${existing_env}"
     preserve_if_empty DEPLOY_MODE DEPLOY_MODE "${existing_env}"
     preserve_if_empty REMOTE_WRITE_URL VM_REMOTE_WRITE_URL "${existing_env}"
@@ -397,7 +394,7 @@ prompt_for_values() {
   prompt_required DEPLOYMENT_ID "Deployment ID" \
     "Fleet/group label used in metrics and configs." "${DEPLOYMENT_ID}"
   prompt_required NODE_ID "Node ID" \
-    "Unique node name (e.g., n100-01)." "${NODE_ID}"
+    "Unique node name (e.g., node-04)." "${NODE_ID}"
   prompt_optional BASE_DOMAIN "Base domain" \
     "Base domain for public hostnames." "${BASE_DOMAIN}"
 
@@ -587,11 +584,6 @@ write_edge_env() {
     cat <<EOF
 DEPLOYMENT_ID=${DEPLOYMENT_ID}
 NODE_ID=${NODE_ID}
-EOF
-    if [ -n "${SYSTEM_ID}" ]; then
-      echo "SYSTEM_ID=${SYSTEM_ID}"
-    fi
-    cat <<EOF
 STACK_NAME=n100
 BASE_DOMAIN=${BASE_DOMAIN:-overdrive.rocks}
 DEPLOY_MODE=${DEPLOY_MODE:-dev}
