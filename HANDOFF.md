@@ -311,7 +311,12 @@ topic ovr/# out 1
 bridge_protocol_version mqttv311
 ```
 
-**Fleet map UI TODO:** Subscribe to `ovr/+/realtime` via WebSocket at `wss://map.overdrive.rocks/mqtt`
+**Fleet map UI DONE:**
+- ✅ Added mqtt.js for WebSocket MQTT client
+- ✅ Subscribes to `ovr/+/realtime` via `wss://map.overdrive.rocks/mqtt`
+- ✅ Merges realtime data with node display (SOC, voltage, power)
+- ✅ Shows connection status indicator
+- ✅ Shows ⚡ icon on nodes with live MQTT data
 
 ---
 

@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import mqtt from 'mqtt';
 
 const API_BASE = '/api';
+const MQTT_WS_URL = `wss://${window.location.host}/mqtt`;
+const MQTT_REALTIME_TOPIC = 'ovr/+/realtime';
 const POLL_INTERVALS = [15, 30, 60, 120, 300, 600, 1200, 1800];
 const MOVE_THRESHOLD_METERS = 20;
 const EVENT_STALE_SECONDS = 300;
@@ -451,8 +454,11 @@ export default function App() {
   const [mapUsage, setMapUsage] = useState(() => loadMapUsage());
   const [expandedCards, setExpandedCards] = useState(() => ({}));
   const [expandedGroups, setExpandedGroups] = useState(() => ({}));
+  const [realtimeData, setRealtimeData] = useState({});
+  const [mqttConnected, setMqttConnected] = useState(false);
 
   const mapRef = useRef(null);
+  const mqttClientRef = useRef(null);
   const baseLayerRef = useRef(null);
   const markersRef = useRef(new Map());
   const childMarkersRef = useRef(new Map());
@@ -578,6 +584,83 @@ export default function App() {
     }
   }, [activeProvider]);
 
+  // MQTT WebSocket connection for realtime data
+  useEffect(() => {
+    let client = null;
+    let reconnectTimeout = null;
+
+    const connect = () => {
+      try {
+        client = mqtt.connect(MQTT_WS_URL, {
+          reconnectPeriod: 5000,
+          connectTimeout: 10000,
+        });
+
+        client.on('connect', () => {
+          console.log('[MQTT] Connected to', MQTT_WS_URL);
+          setMqttConnected(true);
+          client.subscribe(MQTT_REALTIME_TOPIC, { qos: 0 }, (err) => {
+            if (err) {
+              console.error('[MQTT] Subscribe error:', err);
+            } else {
+              console.log('[MQTT] Subscribed to', MQTT_REALTIME_TOPIC);
+            }
+          });
+        });
+
+        client.on('message', (topic, message) => {
+          try {
+            // Extract node_id from topic: ovr/<node_id>/realtime
+            const parts = topic.split('/');
+            if (parts.length >= 2) {
+              const nodeId = parts[1];
+              const payload = JSON.parse(message.toString());
+              setRealtimeData((prev) => ({
+                ...prev,
+                [nodeId]: {
+                  ...payload,
+                  receivedAt: Date.now(),
+                },
+              }));
+            }
+          } catch (err) {
+            console.error('[MQTT] Message parse error:', err);
+          }
+        });
+
+        client.on('error', (err) => {
+          console.error('[MQTT] Error:', err);
+          setMqttConnected(false);
+        });
+
+        client.on('close', () => {
+          console.log('[MQTT] Connection closed');
+          setMqttConnected(false);
+        });
+
+        client.on('offline', () => {
+          console.log('[MQTT] Client offline');
+          setMqttConnected(false);
+        });
+
+        mqttClientRef.current = client;
+      } catch (err) {
+        console.error('[MQTT] Connection failed:', err);
+        setMqttConnected(false);
+      }
+    };
+
+    connect();
+
+    return () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (client) {
+        client.end(true);
+        mqttClientRef.current = null;
+      }
+    };
+  }, []);
+
   const isLoggerNode = (node) =>
     Boolean(node.is_logger || (node.system_id && node.system_id.startsWith('Logger')));
 
@@ -603,6 +686,43 @@ export default function App() {
   const visibleNodes = useMemo(
     () => filteredNodes.filter(hasFreshSignal),
     [filteredNodes]
+  );
+
+  // Helper to get realtime data for a specific system
+  const getRealtimeForSystem = useCallback((nodeId, systemId) => {
+    const nodeData = realtimeData[nodeId];
+    if (!nodeData || !nodeData.systems) return null;
+    return nodeData.systems.find((s) => s.system_id === systemId) || null;
+  }, [realtimeData]);
+
+  // Helper to check if realtime data is fresh (< 30s old)
+  const isRealtimeFresh = useCallback((nodeId) => {
+    const nodeData = realtimeData[nodeId];
+    if (!nodeData || !nodeData.receivedAt) return false;
+    return Date.now() - nodeData.receivedAt < 30000;
+  }, [realtimeData]);
+
+  // Enrich a node with realtime data if available
+  const enrichNodeWithRealtime = useCallback((node) => {
+    if (!node.node_id) return node;
+    const rt = getRealtimeForSystem(node.node_id, node.system_id);
+    if (!rt || !isRealtimeFresh(node.node_id)) return node;
+    return {
+      ...node,
+      soc: rt.soc ?? node.soc,
+      voltage: rt.voltage ?? node.voltage,
+      pin: rt.pin ?? node.pin,
+      pout: rt.pout ?? node.pout,
+      mode: rt.mode ?? node.mode,
+      _realtime: true,
+      _realtimeTs: rt.ts,
+    };
+  }, [getRealtimeForSystem, isRealtimeFresh]);
+
+  // Enriched nodes with realtime data
+  const enrichedVisibleNodes = useMemo(
+    () => visibleNodes.map(enrichNodeWithRealtime),
+    [visibleNodes, enrichNodeWithRealtime]
   );
   const liveEventNodes = useMemo(() => {
     if (!selectedEvent) return [];
@@ -658,22 +778,22 @@ export default function App() {
 
   const groupLabels = useMemo(() => {
     const labels = new Map();
-    visibleNodes.forEach((node) => {
+    enrichedVisibleNodes.forEach((node) => {
       if (!node.node_id) return;
       if (!isLoggerNode(node)) {
         labels.set(node.node_id, node.system_id);
       }
     });
-    visibleNodes.forEach((node) => {
+    enrichedVisibleNodes.forEach((node) => {
       if (!node.node_id || labels.has(node.node_id)) return;
       labels.set(node.node_id, node.host_system_id || node.system_id);
     });
     return labels;
-  }, [visibleNodes]);
+  }, [enrichedVisibleNodes]);
 
   const nodeGroups = useMemo(() => {
     const groups = new Map();
-    visibleNodes.forEach((node) => {
+    enrichedVisibleNodes.forEach((node) => {
       const groupKey = getGroupKey(node);
       let entry = groups.get(groupKey);
       if (!entry) {
@@ -713,7 +833,7 @@ export default function App() {
 
     result.sort((a, b) => a.key.localeCompare(b.key));
     return result;
-  }, [visibleNodes]);
+  }, [enrichedVisibleNodes]);
 
   const gpsGroups = useMemo(
     () =>
@@ -740,7 +860,7 @@ export default function App() {
   const eventGroups = useMemo(() => {
     const groups = new Map();
     const nowSec = Date.now() / 1000;
-    visibleNodes.forEach((node) => {
+    enrichedVisibleNodes.forEach((node) => {
       if (!node.event_id) return;
       if (!isLoggerNode(node)) return;
       if (
@@ -764,7 +884,7 @@ export default function App() {
       byNode.forEach((list) => list.sort());
     });
     return groups;
-  }, [visibleNodes]);
+  }, [enrichedVisibleNodes]);
 
   const getEventGroup = (eventId) => {
     if (!eventId) return null;
@@ -1608,6 +1728,13 @@ export default function App() {
               Last update: {lastUpdated ? lastUpdated.toLocaleTimeString() : '--'}
             </div>
             <div className="meta">Polling: {pollSeconds}s</div>
+            <div className="meta">
+              Realtime: {mqttConnected ? (
+                <span style={{ color: '#4ade80' }}>● Connected</span>
+              ) : (
+                <span style={{ color: '#f87171' }}>○ Disconnected</span>
+              )}
+            </div>
           </div>
           <button className="btn" onClick={fetchNodes}>
             Refresh now
@@ -1967,6 +2094,9 @@ export default function App() {
                       <span>
                         P<sub>out</sub> {compactPout}
                       </span>
+                      {node._realtime ? (
+                        <span style={{ color: '#4ade80', fontSize: '10px', marginLeft: '4px' }} title="Live MQTT data">⚡</span>
+                      ) : null}
                     </div>
                     <span className={`pill ${statusClass}`}>
                       {node.alerts_count > 0 ? `${node.alerts_count} alert` : 'ok'}
@@ -2113,6 +2243,9 @@ export default function App() {
                       <span>
                         P<sub>out</sub> {compactPout}
                       </span>
+                      {node._realtime ? (
+                        <span style={{ color: '#4ade80', fontSize: '10px', marginLeft: '4px' }} title="Live MQTT data">⚡</span>
+                      ) : null}
                     </div>
                     <span className="pill neutral">offline</span>
                   </div>
