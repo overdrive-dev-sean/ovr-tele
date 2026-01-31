@@ -14,6 +14,7 @@ L.Icon.Default.mergeOptions({
 export default function MapPanel({
   latitude,
   longitude,
+  systemIds = [],
   providers,
   activeProvider,
   onTileAttempt,
@@ -81,13 +82,21 @@ export default function MapPanel({
     if (latitude == null || longitude == null) return;
 
     const coords = [latitude, longitude];
+    const label = systemIds.length > 0 ? systemIds.join(', ') : 'Node';
+
     if (!markerRef.current) {
       markerRef.current = L.marker(coords).addTo(map);
+      markerRef.current.bindTooltip(label, {
+        permanent: true,
+        direction: 'top',
+        className: 'system-marker-label'
+      });
     } else {
       markerRef.current.setLatLng(coords);
+      markerRef.current.setTooltipContent(label);
     }
     map.setView(coords, defaultZoom);
-  }, [latitude, longitude, defaultZoom]);
+  }, [latitude, longitude, systemIds, defaultZoom]);
 
   useEffect(() => {
     const map = mapRef.current?._leaflet_map;

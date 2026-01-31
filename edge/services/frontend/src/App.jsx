@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { deleteJson, getJson, postJson, uploadForm } from './api.js';
+import { formatAlertName } from './alertNames.js';
 import MapPanel from './MapPanel.jsx';
 
 const SERVICE_OPTIONS = [
@@ -337,7 +338,8 @@ export default function App() {
   const alertsText = useMemo(() => {
     const alerts = summary.alerts || [];
     if (alerts.length === 0) return 'None';
-    if (alerts.length <= 2) return alerts.join(', ');
+    const formatted = alerts.map(formatAlertName);
+    if (alerts.length <= 2) return formatted.join(', ');
     return `${alerts.length} active`;
   }, [summary.alerts]);
   const mapBlocked = mapStatus?.blocked || {};
@@ -372,6 +374,9 @@ export default function App() {
     const alerts = summary.alerts || [];
     return alerts.length > 0 ? 'alert-bad' : '';
   }, [summary.alerts]);
+
+  const isMultiSystem = dashboardSystems.length > 1;
+  const singleSystem = dashboardSystems.length === 1 ? dashboardSystems[0] : null;
 
   const isEventActive = Boolean(activeEventId);
 
@@ -480,7 +485,7 @@ export default function App() {
 
   const loadDashboard = async () => {
     try {
-      const data = await getJson('/api/dashboard');
+      const data = await getJson('/dashboard');
       setDashboardSystems(data.systems || []);
     } catch (err) {
       console.warn('Failed to load dashboard:', err);
@@ -915,7 +920,7 @@ export default function App() {
 
     const fastTimer = setInterval(loadSummary, 1000);
     const slowTimer = setInterval(loadSummary, 10000);
-    const dashboardTimer = setInterval(loadDashboard, 5000);
+    const dashboardTimer = setInterval(loadDashboard, 2000);
 
     return () => {
       clearInterval(fastTimer);
@@ -924,6 +929,13 @@ export default function App() {
       stopGxSettingPoll();
     };
   }, []);
+
+  // Switch away from dashboard tab if no longer multi-system
+  useEffect(() => {
+    if (!isMultiSystem && activeTab === 'dashboard') {
+      setActiveTab('events');
+    }
+  }, [isMultiSystem, activeTab]);
 
   useEffect(() => {
     if (activeEventId) {
@@ -1354,40 +1366,60 @@ export default function App() {
         />
       </div>
 
-      <div className="top-summary">
-        <div className={`summary-item ${summarySocClass}`}>
-          <span className="summary-label">SOC</span>
-          <span className="summary-value">{formatPercent(summary.soc)}</span>
+      {!isMultiSystem && (
+        <div className="top-summary">
+          <div className={`summary-item ${summarySocClass}`}>
+            <span className="summary-label">SOC</span>
+            <span className="summary-value">{formatPercent(summary.soc)}</span>
+          </div>
+          {singleSystem && (
+            <div className="summary-item">
+              <span className="summary-label">Voltage</span>
+              <span className="summary-value">
+                {singleSystem.voltage !== null ? `${singleSystem.voltage.toFixed(1)}V` : '--'}
+              </span>
+            </div>
+          )}
+          <div className="summary-item">
+            <span className="summary-label">P in</span>
+            <span className="summary-value">{formatPower(summary.pin)}</span>
+          </div>
+          <div className="summary-item">
+            <span className="summary-label">P out</span>
+            <span className="summary-value">{formatPower(summary.pout)}</span>
+          </div>
+          {singleSystem && (
+            <div className="summary-item">
+              <span className="summary-label">Mode</span>
+              <span className="summary-value">
+                {INVERTER_MODE_LABELS[singleSystem.mode] || '--'}
+              </span>
+            </div>
+          )}
+          <div className={`summary-item ${summaryAlertClass}`}>
+            <span className="summary-label">Alerts</span>
+            <span className="summary-value summary-alert" title={(summary.alerts || []).map(formatAlertName).join(', ')}>
+              {alertsText}
+            </span>
+          </div>
         </div>
-        <div className={`summary-item ${summaryAlertClass}`}>
-          <span className="summary-label">Alerts</span>
-          <span className="summary-value summary-alert" title={(summary.alerts || []).join(', ')}>
-            {alertsText}
-          </span>
-        </div>
-        <div className="summary-item">
-          <span className="summary-label">P in</span>
-          <span className="summary-value">{formatPower(summary.pin)}</span>
-        </div>
-        <div className="summary-item">
-          <span className="summary-label">P out</span>
-          <span className="summary-value">{formatPower(summary.pout)}</span>
-        </div>
-      </div>
+      )}
 
       <div className="tabs">
         <button className={`tab ${activeTab === 'events' ? 'active' : ''}`} onClick={() => setActiveTab('events')}>
           Events
         </button>
-        <button
-          className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`}
-          onClick={() => {
-            setActiveTab('dashboard');
-            loadDashboard();
-          }}
-        >
-          Dashboard
-        </button>
+        {isMultiSystem && (
+          <button
+            className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveTab('dashboard');
+              loadDashboard();
+            }}
+          >
+            Dashboard
+          </button>
+        )}
         <button
           className={`tab ${activeTab === 'control' ? 'active' : ''}`}
           onClick={() => {
@@ -1421,7 +1453,12 @@ export default function App() {
                   <div className="dashboard-card-header">
                     <span className="dashboard-system-name">{sys.system_id}</span>
                     {sys.alerts_count > 0 && (
-                      <span className="dashboard-alert-badge">{sys.alerts_count}</span>
+                      <span
+                        className="dashboard-alert-badge"
+                        title={(sys.alerts || []).join(', ')}
+                      >
+                        {sys.alerts_count}
+                      </span>
                     )}
                   </div>
                   <div className="dashboard-card-body">
@@ -1449,6 +1486,18 @@ export default function App() {
                       <span className="dashboard-metric-label">Mode</span>
                       <span className="dashboard-metric-value">{modeLabel}</span>
                     </div>
+                    {sys.alerts && sys.alerts.length > 0 && (
+                      <div className="dashboard-metric dashboard-alerts">
+                        <span className="dashboard-metric-label">Alerts</span>
+                        <div className="dashboard-alerts-list">
+                          {sys.alerts.map((alert, idx) => (
+                            <span key={idx} className="dashboard-alert-chip" title={alert}>
+                              {formatAlertName(alert)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -1939,6 +1988,7 @@ export default function App() {
             <MapPanel
               latitude={gps.latitude}
               longitude={gps.longitude}
+              systemIds={dashboardSystems.map((s) => s.system_id)}
               providers={mapProviders}
               activeProvider={activeProvider}
               onTileAttempt={incrementMapUsage}
