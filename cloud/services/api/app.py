@@ -17,6 +17,12 @@ import jwt
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 
+try:
+    import paho.mqtt.client as mqtt
+    PAHO_AVAILABLE = True
+except ImportError:
+    PAHO_AVAILABLE = False
+
 from map_tiles import (
     PROVIDERS as MAP_TILE_PROVIDERS,
     utc_month_key,
@@ -103,6 +109,20 @@ ACCESS_BYPASS_PATHS = {
     ).split(",")
     if item.strip()
 }
+
+# MQTT configuration for edge node communication
+MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "mqtt").strip()
+MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "").strip()
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "").strip()
+MQTT_PASSWORD_FILE = os.getenv("MQTT_PASSWORD_FILE", "").strip()
+
+if not MQTT_PASSWORD and MQTT_PASSWORD_FILE:
+    try:
+        with open(MQTT_PASSWORD_FILE, "r") as handle:
+            MQTT_PASSWORD = handle.read().strip()
+    except Exception as exc:
+        logger.warning(f"Failed to read MQTT password file: {exc}")
 
 if not MAPBOX_TOKEN and MAPBOX_TOKEN_FILE:
     try:
@@ -556,6 +576,269 @@ def _end_event_registry(event_id: str, ended_at: int) -> bool:
         )
         conn.commit()
     return True
+
+
+# ============================================================================
+# MQTT Subscriber for Edge Node Communication
+# ============================================================================
+
+_mqtt_client = None
+_mqtt_lock = threading.Lock()
+_mqtt_stop_event = threading.Event()
+_registry_publish_pending = threading.Event()
+
+
+def _publish_event_registry() -> None:
+    """Publish current event registry to MQTT for edge nodes."""
+    if not PAHO_AVAILABLE or _mqtt_client is None:
+        return
+    try:
+        events = _list_event_registry(status="all", event_id=None)
+        payload = {
+            "events": [
+                {"event_id": e["event_id"], "event_name": e["event_name"], "status": "ended" if e.get("ended_at") else "active"}
+                for e in events
+            ],
+            "ts": int(time.time() * 1000)
+        }
+        result = _mqtt_client.publish("ovr/registry/events", json.dumps(payload), qos=1, retain=True)
+        if result.rc == 0:
+            logger.info(f"Published event registry: {len(events)} events")
+        else:
+            logger.warning(f"Failed to publish event registry: rc={result.rc}")
+    except Exception as exc:
+        logger.warning(f"Event registry publish failed: {exc}")
+
+
+def _trigger_registry_publish() -> None:
+    """Signal that event registry should be republished."""
+    _registry_publish_pending.set()
+
+
+def _on_mqtt_connect(client, userdata, flags, reason_code, properties=None) -> None:
+    """Handle MQTT connection."""
+    if reason_code == 0:
+        logger.info("MQTT connected to broker")
+        # Subscribe to edge node topics
+        client.subscribe("ovr/+/realtime", qos=1)
+        client.subscribe("ovr/+/reports", qos=1)
+        # Publish current event registry on connect
+        _trigger_registry_publish()
+    else:
+        logger.warning(f"MQTT connection failed: {reason_code}")
+
+
+def _on_mqtt_disconnect(client, userdata, flags, reason_code, properties=None) -> None:
+    """Handle MQTT disconnection."""
+    logger.warning(f"MQTT disconnected: {reason_code}")
+
+
+def _on_mqtt_message(client, userdata, msg) -> None:
+    """Handle incoming MQTT messages from edge nodes."""
+    try:
+        topic = msg.topic
+        payload = json.loads(msg.payload.decode("utf-8"))
+
+        # Parse topic: ovr/<node_id>/<type>
+        parts = topic.split("/")
+        if len(parts) < 3 or parts[0] != "ovr":
+            return
+
+        node_id = parts[1]
+        msg_type = parts[2]
+
+        if msg_type == "realtime":
+            _handle_realtime_message(node_id, payload)
+        elif msg_type == "reports":
+            _handle_report_message(node_id, payload)
+
+    except json.JSONDecodeError as exc:
+        logger.warning(f"Invalid JSON on {msg.topic}: {exc}")
+    except Exception as exc:
+        logger.warning(f"Error processing MQTT message on {msg.topic}: {exc}")
+
+
+def _handle_realtime_message(node_id: str, payload: Dict[str, Any]) -> None:
+    """Process realtime message from edge node.
+
+    Auto-creates events when event_id is present.
+    """
+    event_id = payload.get("event_id")
+    if not event_id:
+        return
+
+    # Skip placeholder event IDs
+    if event_id in PLACEHOLDER_NODE_IDS or not event_id.strip():
+        return
+
+    # Try to create or find the event (event_id is the event name from edge)
+    created, existing = _create_event_registry_entry(event_id, started_at=None)
+    if created:
+        logger.info(f"Auto-created event from MQTT: {event_id} (node: {node_id})")
+        _trigger_registry_publish()
+
+    # Also handle event_ids array if present (for multi-event scenarios)
+    event_ids = payload.get("event_ids", [])
+    for eid in event_ids:
+        if eid and eid != event_id and eid not in PLACEHOLDER_NODE_IDS:
+            created, _ = _create_event_registry_entry(eid, started_at=None)
+            if created:
+                logger.info(f"Auto-created event from MQTT: {eid} (node: {node_id})")
+                _trigger_registry_publish()
+
+
+def _handle_report_message(node_id: str, payload: Dict[str, Any]) -> None:
+    """Process report message from edge node.
+
+    Saves report to filesystem (same as HTTP upload endpoint).
+    Note: This function is called from MQTT handler, so helper functions
+    (_store_report_bundle, etc.) are defined later in the file but are
+    available at runtime.
+    """
+    report_type = (payload.get("report_type") or "event").strip().lower()
+    if report_type != "event":
+        logger.warning(f"Unsupported report type via MQTT: {report_type}")
+        return
+
+    report = payload.get("report") or {}
+    if not isinstance(report, dict):
+        logger.warning("Report via MQTT: report must be an object")
+        return
+
+    event_id = (payload.get("event_id") or report.get("event_id") or "").strip()
+    node_id_payload = (payload.get("node_id") or report.get("node_id") or "").strip()
+    system_id = (payload.get("system_id") or report.get("system_id") or "").strip()
+    deployment_id = (payload.get("deployment_id") or report.get("deployment_id") or "").strip()
+    report_html = payload.get("report_html")
+    temp_event_id = (payload.get("temp_event_id") or report.get("temp_event_id") or "").strip()
+    event_id_original = (
+        payload.get("event_id_original")
+        or report.get("event_id_original")
+        or temp_event_id
+    )
+    generated_at = payload.get("generated_at") or report.get("generated_at") or int(time.time() * 1e9)
+
+    # Use node_id from topic if not in payload
+    if not node_id_payload:
+        node_id_payload = node_id
+
+    if not event_id:
+        logger.warning("Report via MQTT missing event_id")
+        return
+
+    # Build node_key using the same logic as HTTP endpoint
+    node_key = _report_node_key(node_id_payload, system_id)
+    if not _safe_report_slug(event_id) or not node_key:
+        logger.warning("Report via MQTT has invalid identifiers")
+        return
+
+    # Build report payload (same structure as HTTP endpoint)
+    report_payload = dict(report)
+    report_payload["report_type"] = "event"
+    report_payload["event_id"] = event_id
+    if event_id_original:
+        report_payload["event_id_original"] = event_id_original
+    if node_id_payload:
+        report_payload["node_id"] = node_id_payload
+    if system_id:
+        report_payload["system_id"] = system_id
+    if deployment_id:
+        report_payload["deployment_id"] = deployment_id
+    report_payload["generated_at"] = generated_at
+
+    # Store the report using the same function as HTTP endpoint
+    stored = _store_report_bundle(
+        event_id,
+        node_key,
+        report_payload,
+        report_html,
+        {
+            "node_id": node_id_payload,
+            "system_id": system_id,
+            "deployment_id": deployment_id,
+            "generated_at": generated_at,
+            "event_id_original": event_id_original or None,
+            "version": payload.get("version", "v2"),
+            "source": "mqtt",
+        },
+    )
+
+    if stored:
+        logger.info(f"Stored report via MQTT: event={event_id} node={node_key}")
+        # Generate aggregate report
+        _write_aggregate_report(event_id)
+    else:
+        logger.warning(f"Failed to store report via MQTT: event={event_id}")
+
+
+def _mqtt_worker() -> None:
+    """Background worker that maintains MQTT connection to broker."""
+    global _mqtt_client
+
+    if not PAHO_AVAILABLE:
+        logger.warning("paho-mqtt not available, MQTT subscriber disabled")
+        return
+
+    reconnect_delay = 5
+    max_reconnect_delay = 60
+
+    while not _mqtt_stop_event.is_set():
+        try:
+            with _mqtt_lock:
+                _mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                _mqtt_client.on_connect = _on_mqtt_connect
+                _mqtt_client.on_disconnect = _on_mqtt_disconnect
+                _mqtt_client.on_message = _on_mqtt_message
+
+                if MQTT_USERNAME and MQTT_PASSWORD:
+                    _mqtt_client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
+                _mqtt_client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=60)
+                _mqtt_client.loop_start()
+
+            logger.info(f"MQTT worker connected to {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
+            reconnect_delay = 5  # Reset on successful connect
+
+            # Main loop: check for registry publish requests
+            while not _mqtt_stop_event.is_set():
+                if _registry_publish_pending.wait(timeout=1):
+                    _registry_publish_pending.clear()
+                    _publish_event_registry()
+
+        except Exception as exc:
+            logger.warning(f"MQTT worker error: {exc}")
+            with _mqtt_lock:
+                if _mqtt_client:
+                    try:
+                        _mqtt_client.loop_stop()
+                        _mqtt_client.disconnect()
+                    except:
+                        pass
+                    _mqtt_client = None
+
+            # Exponential backoff
+            _mqtt_stop_event.wait(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
+    # Cleanup on shutdown
+    with _mqtt_lock:
+        if _mqtt_client:
+            try:
+                _mqtt_client.loop_stop()
+                _mqtt_client.disconnect()
+            except:
+                pass
+            _mqtt_client = None
+
+
+# Start MQTT worker thread
+if PAHO_AVAILABLE:
+    _mqtt_thread = threading.Thread(target=_mqtt_worker, daemon=True, name="mqtt-subscriber")
+    _mqtt_thread.start()
+    logger.info("MQTT subscriber worker started")
+else:
+    logger.warning("paho-mqtt not installed, MQTT subscriber disabled")
+
 
 # ============================================================================
 # Cloudflare Access JWT

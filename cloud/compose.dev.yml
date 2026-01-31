@@ -32,6 +32,7 @@ services:
     container_name: cloud-api
     depends_on:
       - victoria-metrics
+      - mqtt
     environment:
       - FLEET_VM_URL=http://victoria-metrics:8428
       - FLEET_VM_WRITE_URL=${FLEET_VM_WRITE_URL:-http://victoria-metrics:8428/write}
@@ -60,6 +61,12 @@ services:
       - FLEET_REPORTS_PATH=${FLEET_REPORTS_PATH:-/data/reports}
       - FLEET_REPORTS_UPLOAD_TOKEN=${FLEET_REPORTS_UPLOAD_TOKEN}
       - FLEET_REPORTS_TIMEZONE=${FLEET_REPORTS_TIMEZONE:-America/Los_Angeles}
+      # MQTT broker connection (for edge node communication)
+      - MQTT_BROKER_HOST=mqtt
+      - MQTT_BROKER_PORT=1883
+      - MQTT_USERNAME=${MQTT_USERNAME:-ovr-api}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - MQTT_PASSWORD_FILE=${MQTT_PASSWORD_FILE:-/etc/ovr/secrets/mqtt_api_password}
     volumes:
       - fleet_data:/data
       - fleet_reports:/data/reports

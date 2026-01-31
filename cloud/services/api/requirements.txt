@@ -3,3 +3,4 @@ requests==2.32.3
 gunicorn==22.0.0
 PyJWT==2.8.0
 cryptography==42.0.5
+paho-mqtt==2.1.0

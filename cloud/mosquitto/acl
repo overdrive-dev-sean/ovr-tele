@@ -9,6 +9,13 @@ user ovr-bridge
 topic readwrite ovr/#
 
 # =============================================================================
+# Cloud API service
+# =============================================================================
+# API service subscribes to realtime/reports and publishes registry updates
+user ovr-api
+topic readwrite ovr/#
+
+# =============================================================================
 # Anonymous users (browser clients via WebSocket)
 # =============================================================================
 # Anonymous clients can only subscribe (read), not publish

@@ -2134,11 +2134,42 @@ export default function App() {
                       <div className="node-actions">
                         <button
                           className="btn ghost"
-                          onClick={() => clearManualLocation(node.system_id)}
+                          onClick={() => clearManualLocation(node.node_id || node.system_id)}
                         >
                           Clear manual
                         </button>
                       </div>
+                    ) : null}
+                    {node.systems && node.systems.length > 0 ? (
+                      <details className="systems-group" open>
+                        <summary>
+                          Systems ({node.systems.length})
+                        </summary>
+                        <div className="systems-list">
+                          {node.systems.map((sys) => (
+                            <div key={sys.system_id} className={`system-item system-${sys.type}`}>
+                              <div className="system-header">
+                                <span className="system-title">{sys.system_id}</span>
+                                <span className="system-type">{sys.type}</span>
+                              </div>
+                              <div className="system-metrics">
+                                {sys.type === 'gx' ? (
+                                  <>
+                                    <span>SOC {formatPercent(sys.soc)}</span>
+                                    <span>P<sub>out</sub> {formatPower(sys.pout)}</span>
+                                  </>
+                                ) : sys.type === 'acuvim' ? (
+                                  <>
+                                    <span>V {formatVoltage(sys.vavg)}</span>
+                                    <span>I {formatCurrent(sys.iavg)}</span>
+                                    <span>P {formatPower(sys.p)}</span>
+                                  </>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
                     ) : null}
                     {loggerItems.length > 0 ? (
                       <details className="logger-group">
@@ -2281,6 +2312,37 @@ export default function App() {
                         Place on map
                       </button>
                     </div>
+                    {node.systems && node.systems.length > 0 ? (
+                      <details className="systems-group" open>
+                        <summary>
+                          Systems ({node.systems.length})
+                        </summary>
+                        <div className="systems-list">
+                          {node.systems.map((sys) => (
+                            <div key={sys.system_id} className={`system-item system-${sys.type}`}>
+                              <div className="system-header">
+                                <span className="system-title">{sys.system_id}</span>
+                                <span className="system-type">{sys.type}</span>
+                              </div>
+                              <div className="system-metrics">
+                                {sys.type === 'gx' ? (
+                                  <>
+                                    <span>SOC {formatPercent(sys.soc)}</span>
+                                    <span>P<sub>out</sub> {formatPower(sys.pout)}</span>
+                                  </>
+                                ) : sys.type === 'acuvim' ? (
+                                  <>
+                                    <span>V {formatVoltage(sys.vavg)}</span>
+                                    <span>I {formatCurrent(sys.iavg)}</span>
+                                    <span>P {formatPower(sys.p)}</span>
+                                  </>
+                                ) : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ) : null}
                     {loggerItems.length > 0 ? (
                       <details className="logger-group">
                         <summary>

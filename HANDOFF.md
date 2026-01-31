@@ -267,7 +267,7 @@ When working in tandem:
   ```
 
 ### Cloud Claude
-- **Working on:** Node/system hierarchy refactor complete ✓
+- **Working on:** MQTT subscriber for edge node communication ✓
 - **Blocked by:** (nothing)
 - **Notes:**
   - ✅ Remote write confirmed - receiving metrics
@@ -279,6 +279,11 @@ When working in tandem:
   - ✅ Node URL built from `node_id` → `https://{node_id}.overdrive.rocks`
   - ✅ Metric names aligned with Telegraf output (victron_*_value, acuvim_*)
   - ✅ Removed polling indicator and refresh button from Fleet Map UI
+  - ✅ **MQTT subscriber** added to cloud API:
+    - Subscribes to `ovr/+/realtime` → auto-creates events from `event_id`
+    - Subscribes to `ovr/+/reports` → saves reports to filesystem
+    - Publishes to `ovr/registry/events` when event list changes
+    - Uses `ovr-api` user with devpassword123 (change in prod!)
 
 **API Response Format** (`/api/nodes`):
 ```json
@@ -406,15 +411,13 @@ bridge_protocol_version mqttv311
 - ✅ Shows connection status indicator
 - ✅ Shows ⚡ icon on nodes with live MQTT data
 
-**Cloud TODO: MQTT subscriptions**
-Cloud API should subscribe to internal MQTT broker and handle:
-1. `ovr/+/realtime` → auto-create events when `event_id` present
-2. `ovr/+/reports` → save reports to database
-3. Publish `ovr/registry/events` when event list changes
+**Cloud MQTT subscriptions: ✅ DONE**
+Cloud API subscribes to internal MQTT broker:
+1. ✅ `ovr/+/realtime` → auto-create events when `event_id` present
+2. ✅ `ovr/+/reports` → save reports to filesystem
+3. ✅ Publish `ovr/registry/events` when event list changes
 
-Implementation options:
-- Add MQTT subscriber to Flask API (background thread)
-- Or create separate worker that syncs MQTT → events table
+Implementation: Added MQTT subscriber to Flask API (background thread in `app.py`)
 
 ---
 
@@ -448,6 +451,12 @@ curl -s localhost:8428/api/v1/query?query=up | jq
 ## Files Changed Recently
 
 ```
+2026-01-31: cloud/services/api/app.py (MQTT subscriber for auto-event creation, report storage, registry publish)
+2026-01-31: cloud/services/api/requirements.txt (added paho-mqtt)
+2026-01-31: cloud/compose.dev.yml (API depends on mqtt, MQTT env vars)
+2026-01-31: cloud/mosquitto/passwd.dev (added ovr-api user)
+2026-01-31: cloud/mosquitto/acl (added ovr-api permissions)
+2026-01-31: cloud/.env.example (MQTT configuration)
 2026-01-31: edge/services/events/app.py (CF Access service token support for cloud API)
 2026-01-31: edge/services/events/.env.example (CF_ACCESS_CLIENT_ID/SECRET vars)
 2026-01-31: cloud/services/api/app.py (node/system hierarchy refactor, metric name alignment)
