@@ -46,6 +46,7 @@ const MAP_USAGE_FLUSH_MS = 30000;
 const DEFAULT_LOGGER = { id: 0, service: '', location: '' };
 const INVERTER_MODE_LABELS = { 3: 'On', 2: 'Inverter Only', 1: 'Charger Only', 4: 'Off' };
 const INVERTER_MODE_VALUES = { 3: 'on', 2: 'inverter_only', 1: 'charger_only', 4: 'off' };
+const INVERTER_MODE_NUMBERS = { 'on': 3, 'inverter_only': 2, 'charger_only': 1, 'off': 4 };
 const EARTH_RADIUS_METERS = 6378137;
 const MAX_LATITUDE = 85.05112878;
 
@@ -266,6 +267,7 @@ export default function App() {
     inverter_output_voltage: ''
   });
   const [gxStatus, setGxStatus] = useState({ message: '', level: 'info' });
+  const [pendingSettings, setPendingSettings] = useState({});  // {settingName: expectedValue}
   const [gps, setGps] = useState({ latitude: null, longitude: null, updatedAt: null });
   const [mapStatus, setMapStatus] = useState(null);
   const [mapProviders, setMapProviders] = useState(() => ({
@@ -841,7 +843,8 @@ export default function App() {
   const loadGXSettings = async (systemId) => {
     try {
       const targetId = systemId || gxSystemId;
-      const url = targetId ? `/gx/settings?system_id=${encodeURIComponent(targetId)}` : '/gx/settings';
+      // Use realtime MQTT endpoint for faster updates
+      const url = targetId ? `/gx/settings/realtime?system_id=${encodeURIComponent(targetId)}` : '/gx/settings/realtime';
       const data = await getJson(url);
       setGxSettings(data);
     } catch (err) {
@@ -881,6 +884,8 @@ export default function App() {
     gxPollRef.current.startedAt = Date.now();
     gxPollRef.current.setting = settingName;
     gxPollRef.current.expected = normalizeExpectedValue(settingName, expectedValue);
+    // Capture the current system_id for polling
+    const pollSystemId = gxSystemId || (gxSystems[0]?.system_id);
     setGxStatus({
       message: 'Update sent. Current values may take a moment to refresh. Polling for confirmation...',
       level: 'info'
@@ -888,13 +893,25 @@ export default function App() {
 
     const tick = async () => {
       try {
-        const settings = await getJson('/gx/settings');
-        setGxSettings(settings);
+        const url = pollSystemId
+          ? `/gx/settings/realtime?system_id=${encodeURIComponent(pollSystemId)}`
+          : '/gx/settings/realtime';
+        const settings = await getJson(url);
+        // Only update the specific setting that was changed, not all of them
+        setGxSettings(prev => ({
+          ...prev,
+          [settingName]: settings[settingName]
+        }));
+        // Only confirm if value matches AND source is mqtt (actual GX device confirmation)
+        const setting = settings[settingName];
         if (
           gxPollRef.current.expected !== null &&
+          setting?.source === 'mqtt' &&
           isSettingApplied(settingName, gxPollRef.current.expected, settings)
         ) {
-          setGxStatus({ message: 'Current value updated.', level: 'success' });
+          // Clear pending state - confirmed by GX device via MQTT
+          setPendingSettings(prev => { const n = { ...prev }; delete n[settingName]; return n; });
+          setGxStatus({ message: 'Setting confirmed by device.', level: 'success' });
           stopGxSettingPoll();
           return;
         }
@@ -903,8 +920,10 @@ export default function App() {
       }
 
       if (Date.now() - gxPollRef.current.startedAt >= 20000) {
+        // Clear pending on timeout - assume it worked
+        setPendingSettings(prev => { const n = { ...prev }; delete n[settingName]; return n; });
         setGxStatus({
-          message: 'Update sent. Current values may still be syncing. Consider refreshing values.',
+          message: 'Setting sent. Confirmation timed out but value may have applied.',
           level: 'warn'
         });
         stopGxSettingPoll();
@@ -914,7 +933,7 @@ export default function App() {
       gxPollRef.current.handle = setTimeout(tick, 2000);
     };
 
-    gxPollRef.current.handle = setTimeout(tick, 1000);
+    gxPollRef.current.handle = setTimeout(tick, 200);  // Fast first poll - backend optimistically caches
   };
 
   const setGXSetting = async (settingName, value) => {
@@ -927,13 +946,27 @@ export default function App() {
     if (!window.confirm(`Set ${settingName.replace(/_/g, ' ')} to ${value}${displaySystem}?`)) return;
 
     try {
+      const numericValue = parseFloat(value);
+      // Mark as pending before API call
+      setPendingSettings(prev => ({ ...prev, [settingName]: numericValue }));
       const payload = { setting: settingName, value };
       if (targetSystem) payload.system_id = targetSystem;
       const result = await postJson('/gx/setting', payload);
+      // Optimistically update UI immediately with the new value
+      setGxSettings(prev => ({
+        ...prev,
+        [settingName]: {
+          ...prev?.[settingName],
+          value: numericValue,
+          updated_at: Date.now() * 1000000  // ns
+        }
+      }));
       showModal(result.message || 'Setting updated', 'success');
-      startGxSettingPoll(settingName, value);
+      startGxSettingPoll(settingName, numericValue);
       setGxInputs((prev) => ({ ...prev, [settingName]: '' }));
     } catch (err) {
+      // Clear pending on error
+      setPendingSettings(prev => { const n = { ...prev }; delete n[settingName]; return n; });
       showModal(`Error: ${err.message}`, 'error');
     }
   };
@@ -944,13 +977,27 @@ export default function App() {
     if (!window.confirm(`Change inverter mode to "${value.replace(/_/g, ' ')}"${displaySystem}?`)) return;
 
     try {
+      const modeValue = INVERTER_MODE_NUMBERS[value] ?? value;
+      // Mark as pending before API call
+      setPendingSettings(prev => ({ ...prev, [settingName]: modeValue }));
       const payload = { setting: settingName, value };
       if (targetSystem) payload.system_id = targetSystem;
       const result = await postJson('/gx/setting', payload);
+      // Optimistically update UI immediately
+      setGxSettings(prev => ({
+        ...prev,
+        [settingName]: {
+          ...prev?.[settingName],
+          value: modeValue,
+          updated_at: Date.now() * 1000000  // ns
+        }
+      }));
       showModal(result.message || 'Setting updated', 'success');
-      startGxSettingPoll(settingName, value);
+      startGxSettingPoll(settingName, modeValue);
       setGxInputs((prev) => ({ ...prev, inverter_mode: value }));
     } catch (err) {
+      // Clear pending on error
+      setPendingSettings(prev => { const n = { ...prev }; delete n[settingName]; return n; });
       showModal(`Error: ${err.message}`, 'error');
     }
   };
@@ -2121,9 +2168,9 @@ export default function App() {
           <div className="control-item">
             <label>Battery Charge Current Limit</label>
             <div className="description">Maximum charging current from grid/generator (Amps)</div>
-            <div className="current-value">
+            <div className="current-value" style={pendingSettings.battery_charge_current !== undefined ? { color: '#f59e0b' } : {}}>
               Current: {gxSettings?.battery_charge_current?.value ?? 'Loading...'}
-              {formatAge(gxSettings?.battery_charge_current?.updated_at)}
+              {pendingSettings.battery_charge_current !== undefined ? ' (confirming...)' : formatAge(gxSettings?.battery_charge_current?.updated_at)}
             </div>
             <input
               type="number"
@@ -2151,9 +2198,9 @@ export default function App() {
           <div className="control-item">
             <label>Inverter Mode</label>
             <div className="description">Control inverter operation mode</div>
-            <div className="current-value">
+            <div className="current-value" style={pendingSettings.inverter_mode !== undefined ? { color: '#f59e0b' } : {}}>
               Current: {INVERTER_MODE_LABELS[Number(gxSettings?.inverter_mode?.value)] || 'Loading...'}
-              {formatAge(gxSettings?.inverter_mode?.updated_at)}
+              {pendingSettings.inverter_mode !== undefined ? ' (confirming...)' : formatAge(gxSettings?.inverter_mode?.updated_at)}
             </div>
             <select
               className="control-input"
@@ -2185,9 +2232,9 @@ export default function App() {
           <div className="control-item">
             <label>AC Input Current Limit</label>
             <div className="description">Maximum current draw from AC input (Amps)</div>
-            <div className="current-value">
+            <div className="current-value" style={pendingSettings.ac_input_current_limit !== undefined ? { color: '#f59e0b' } : {}}>
               Current: {gxSettings?.ac_input_current_limit?.value ?? 'Loading...'}
-              {formatAge(gxSettings?.ac_input_current_limit?.updated_at)}
+              {pendingSettings.ac_input_current_limit !== undefined ? ' (confirming...)' : formatAge(gxSettings?.ac_input_current_limit?.updated_at)}
             </div>
             <input
               type="number"
@@ -2218,9 +2265,9 @@ export default function App() {
           <div className="control-item">
             <label>Inverter Output Voltage</label>
             <div className="description">AC output voltage setpoint (Volts)</div>
-            <div className="current-value">
+            <div className="current-value" style={pendingSettings.inverter_output_voltage !== undefined ? { color: '#f59e0b' } : {}}>
               Current: {gxSettings?.inverter_output_voltage?.value ?? 'Loading...'}
-              {formatAge(gxSettings?.inverter_output_voltage?.updated_at)}
+              {pendingSettings.inverter_output_voltage !== undefined ? ' (confirming...)' : formatAge(gxSettings?.inverter_output_voltage?.updated_at)}
             </div>
             <input
               type="number"
