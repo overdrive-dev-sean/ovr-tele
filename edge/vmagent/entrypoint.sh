@@ -8,7 +8,8 @@ set -a
 set +a
 
 SCRAPE_CONFIG="${VMAGENT_SCRAPE_CONFIG:-/etc/vmagent/scrape.yml}"
-LOCAL_WRITE_URL="${VM_LOCAL_WRITE_URL:-http://victoria-metrics:8428/api/v1/write}"
+# Use localhost since vmagent runs on host network (Docker bridge broken on this host)
+LOCAL_WRITE_URL="${VM_LOCAL_WRITE_URL:-http://localhost:8428/api/v1/write}"
 REMOTE_WRITE_URL="${VM_REMOTE_WRITE_URL:-}"
 REMOTE_WRITE_USERNAME="${VM_REMOTE_WRITE_USERNAME:-}"
 REMOTE_WRITE_PASSWORD_FILE="${VM_REMOTE_WRITE_PASSWORD_FILE:-}"

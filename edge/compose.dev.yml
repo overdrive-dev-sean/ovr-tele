@@ -34,11 +34,8 @@ services:
     entrypoint:
       - /bin/sh
       - /entrypoint.sh
-    ports:
-      - "8429:8429"
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
+    # Host network required - Docker bridge networking broken on this host
+    network_mode: host
     volumes:
       - ./vmagent/entrypoint.sh:/entrypoint.sh:ro
       - /etc/ovr/vmagent.scrape.yml:/etc/vmagent/scrape.yml:ro

@@ -37,7 +37,7 @@ scrape_configs:
         - '{__name__=~"acuvim_.*"}'
     static_configs:
       - targets:
-          - "victoria-metrics:8428"
+          - "localhost:8428"
 
   # Federate victron metrics from VM (written by Telegraf) for stream aggregation
   - job_name: vm_federate_victron
@@ -48,4 +48,4 @@ scrape_configs:
         - '{__name__=~"victron_.*"}'
     static_configs:
       - targets:
-          - "victoria-metrics:8428"
+          - "localhost:8428"
