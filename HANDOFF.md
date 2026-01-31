@@ -208,6 +208,11 @@ See `CLAUDE.md` for full technical context.
 3. **API consistency** - Edge and cloud have different event models
 4. **Alerting** - Design notes in `docs/design/ALERTING_DESIGN.md`, nothing implemented
 5. **GX realtime null values** - Some GX fields (pin, pout, mode) are null in `/api/realtime`. Likely MQTT topic mapping issue - `REALTIME_TOPIC_MAP` paths may not match all GX models/instance numbers. Not critical but needs cleanup.
+6. **Service dropdown enhancement** - Currently only shows discovered systems. Future: add tiered selection:
+   - Discovered (realtime) - default
+   - Known (from `gx_systems.json`, `targets_acuvim.txt`) - even if offline
+   - Manual IP entry - with subnet hints showing what networks the node can reach
+   This helps with pre-staging and troubleshooting connectivity.
 
 ---
 

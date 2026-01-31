@@ -3,19 +3,7 @@ import { deleteJson, getJson, postJson, uploadForm } from './api.js';
 import { formatAlertName } from './alertNames.js';
 import MapPanel from './MapPanel.jsx';
 
-const SERVICE_OPTIONS = [
-  'Pro6005-2',
-  'Logger 0',
-  'Logger 1',
-  'Logger 2',
-  'Logger 3',
-  'Logger 4',
-  'Logger 5',
-  'Logger 6',
-  'Logger 7',
-  'Logger 8',
-  'Logger 9'
-];
+// SERVICE_OPTIONS is now populated dynamically from discovered systems
 
 const FALLBACK_MAP_TILE_URL =
   import.meta.env.VITE_MAP_TILE_URL ||
@@ -239,6 +227,7 @@ export default function App() {
     alerts: []
   });
   const [dashboardSystems, setDashboardSystems] = useState([]);
+  const [discoveredServices, setDiscoveredServices] = useState([]);
   const [activeEventId, setActiveEventId] = useState('');
   const [activeLoggers, setActiveLoggers] = useState([]);
   const [eventIdInput, setEventIdInput] = useState('');
@@ -491,7 +480,15 @@ export default function App() {
     try {
       // Use realtime MQTT-cached endpoint for faster updates
       const data = await getJson('/realtime');
-      const systems = (data.systems || []).map((sys) => ({
+      const allSystems = data.systems || [];
+
+      // Extract all system_ids for service dropdown (GX + ACUVIM)
+      const serviceIds = allSystems.map((sys) => sys.system_id).filter(Boolean).sort();
+      setDiscoveredServices(serviceIds);
+
+      // Filter to GX systems only for dashboard display (ACUVIM has different fields)
+      const gxSystems = allSystems.filter((sys) => sys.type !== 'acuvim');
+      const systems = gxSystems.map((sys) => ({
         ...sys,
         // Mark stale systems for UI indication
         alerts: sys.stale ? ['Data stale'] : [],
@@ -503,7 +500,9 @@ export default function App() {
       // Fallback to traditional dashboard endpoint if realtime fails
       try {
         const fallback = await getJson('/dashboard');
-        setDashboardSystems(fallback.systems || []);
+        const fallbackSystems = fallback.systems || [];
+        setDashboardSystems(fallbackSystems);
+        setDiscoveredServices(fallbackSystems.map((sys) => sys.system_id).filter(Boolean).sort());
       } catch (fallbackErr) {
         console.warn('Fallback dashboard also failed:', fallbackErr);
       }
@@ -1117,7 +1116,7 @@ export default function App() {
   const startEvent = async () => {
     const loggers = getSelectedLoggers();
     if (loggers.length === 0) {
-      showModal('At least one logger required', 'error');
+      showModal('At least one service required', 'error');
       return;
     }
 
@@ -1144,7 +1143,7 @@ export default function App() {
       if (!eventId) {
         throw new Error('Missing event ID in response');
       }
-      showModal(`Event "${eventId}" started with ${loggers.length} logger(s)`, 'success');
+      showModal(`Event "${eventId}" started with ${loggers.length} system(s)`, 'success');
       setNoteText('');
       const gpsData = await loadGps(true);
       await loadActiveLocations();
@@ -1166,7 +1165,7 @@ export default function App() {
       return;
     }
     if (loggers.length === 0) {
-      showModal('At least one logger required', 'error');
+      showModal('At least one service required', 'error');
       return;
     }
 
@@ -1178,7 +1177,7 @@ export default function App() {
           location: logger.location || ''
         });
       }
-      showModal(`Added ${loggers.length} logger(s) to event "${eventId}"`, 'success');
+      showModal(`Added ${loggers.length} system(s) to event "${eventId}"`, 'success');
       await loadActiveLocations();
     } catch (err) {
       showModal(`Error: ${err.message}`, 'error');
@@ -1191,7 +1190,7 @@ export default function App() {
       showModal('Event ID not found', 'error');
       return;
     }
-    if (!window.confirm(`End ALL loggers for event "${eventId}"?`)) return;
+    if (!window.confirm(`End ALL systems for event "${eventId}"?`)) return;
 
     try {
       const result = await postJson('/event/end_all', { event_id: eventId });
@@ -1429,9 +1428,10 @@ export default function App() {
     }
   };
 
-  const renderLoggerSelectOptions = (currentService) => {
+  const renderSystemSelectOptions = (currentService) => {
     const selected = new Set(formLoggers.map((entry) => entry.service).filter(Boolean));
-    return SERVICE_OPTIONS.map((option) => {
+    // Use dynamically discovered services from realtime data
+    return discoveredServices.map((option) => {
       const disabled =
         activeServices.has(option) || (selected.has(option) && option !== currentService);
       return (
@@ -1632,7 +1632,7 @@ export default function App() {
           <div className="events-main">
             {!isEventActive && (
               <div className="form-group">
-                <label htmlFor="eventId">Site *</label>
+                <label htmlFor="eventId">Event Name *</label>
                 <input
                   type="text"
                   id="eventId"
@@ -1665,7 +1665,7 @@ export default function App() {
                       onChange={(e) => handleLoggerChange(logger.id, 'service', e.target.value)}
                     >
                       <option value="">-- Select Service --</option>
-                      {renderLoggerSelectOptions(logger.service)}
+                      {renderSystemSelectOptions(logger.service)}
                     </select>
                   </div>
                   <div className="form-group">
@@ -1683,7 +1683,7 @@ export default function App() {
             </div>
 
             <button className="add-logger-btn" type="button" onClick={addLogger}>
-              + Add Additional Logger
+              + Add System
             </button>
 
             <div className="form-group note-entry note-entry-mobile">
@@ -1694,7 +1694,7 @@ export default function App() {
                 value={noteService}
                 onChange={(e) => setNoteService(e.target.value)}
               >
-                <option value="">General note (all loggers)</option>
+                <option value="">General note (all systems)</option>
                 {noteServiceOptions.map((service) => (
                   <option key={service} value={service}>
                     {service}
@@ -1710,7 +1710,7 @@ export default function App() {
             </div>
 
             <button className="btn btn-start" onClick={isEventActive ? addLoggerToEvent : startEvent}>
-              {isEventActive ? '+ ADD LOGGER' : 'START EVENT'}
+              {isEventActive ? '+ ADD SYSTEM' : 'START EVENT'}
             </button>
             {isEventActive && (
               <button className="btn btn-end" onClick={endAllLoggers}>
@@ -1734,7 +1734,7 @@ export default function App() {
                 value={noteService}
                 onChange={(e) => setNoteService(e.target.value)}
               >
-                <option value="">General note (all loggers)</option>
+                <option value="">General note (all systems)</option>
                 {noteServiceOptions.map((service) => (
                   <option key={service} value={service}>
                     {service}
