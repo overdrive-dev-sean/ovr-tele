@@ -1,5 +1,13 @@
 # GX device hostnames (mDNS .local names, one per line)
 # Format: hostname without .local suffix
+#
+# Special: "venus" expands to venus.local, venus-2.local, ... venus-30.local
+# Use this for discovering GX devices with default hostnames on shared networks
+#
+# system_id is derived from CustomName via MQTT (fallback to portal_id)
+
+# Auto-discover default venus hostnames (e.g., on LTE/WiFi networks)
+venus
 
 # Cerbo GX Pro 6005 series
 pro6005-1

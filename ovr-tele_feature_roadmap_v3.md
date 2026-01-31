@@ -2,7 +2,26 @@
 *(Unified PWA + Mesh Proxy + MQTT Summary/Control + GX MQTT/Telegraf discovery)*
 
 This roadmap is organized to keep changes **reviewable, testable, and reversible** on real edge nodes.
-It assumes your current “mostly working refactor” is living on an integration branch (ex: `feat/4-fleet-map-events`).
+It assumes your current "mostly working refactor" is living on an integration branch (ex: `feat/4-fleet-map-events`).
+
+## Status overview (2025-01-30)
+
+| Milestone | Status | Notes |
+|-----------|--------|-------|
+| 0 - Env layout + symlinks | ✅ Done | `/etc/ovr/` canonical, symlinks in place |
+| 0.5 - Smoke scripts | ⬜ Not started | |
+| 1 - Phase 0 networking | ⬜ Not started | |
+| 2 - Peers + mesh proxy | ⬜ Not started | |
+| 3 - MQTT broker foundation | ⬜ Not started | |
+| 4 - MQTT summary plane | ⬜ Not started | |
+| 4b - MQTT control plane | ⬜ Not started | |
+| 4c - GX MQTT via Telegraf | ✅ Done | Starlark processor, dynamic config gen |
+| 4d - GX discovery automation | ✅ Done | Allowlist-based (not mDNS), `refresh_gx_mqtt_sources.sh` |
+| 4e - GX MQTT keepalive | ✅ Done | Integrated into refresh script, 50s timer |
+| 5 - PWA service worker | ⬜ Not started | |
+| 6 - Unified PWA beta | ⬜ Not started | |
+| 7 - PWA cutover | ⬜ Not started | |
+| 8 - Mesh transport | ⬜ Not started | |
 
 > Core principle: **Do not ship a giant refactor all at once.**  
 > We add capability in layers: host layout → Phase‑0 networking → safe peer proxy → MQTT summary/control → GX ingestion → unified PWA beta → cutover.
@@ -38,23 +57,24 @@ For each milestone:
 
 # Milestones
 
-## Milestone 0 — Standardize env layout + symlinks
+## Milestone 0 — Standardize env layout + symlinks ✅
 **Branch:** `chore/0-env-layout-ovr-symlinks`
+**Status:** Complete (merged to main 2025-01-30)
 
 ### What
 - Make `/etc/ovr` the canonical env/config home.
 - Create symlinks:
-  - `/opt/edge/.env  -> /etc/ovr/edge.env`
-  - `/opt/cloud/.env -> /etc/ovr/cloud.env`
+  - `/opt/ovr/edge/.env  -> /etc/ovr/edge.env`
+  - `/opt/ovr/cloud/.env -> /etc/ovr/cloud.env`
 - Resolve `/etc/overdrive` vs `/etc/ovr` drift safely (symlink aliasing; no destructive deletes).
-- Fix docs that reference wrong paths (e.g., `/opt/edge/edge`).
+- Fix docs that reference wrong paths (e.g., old `/opt/edge/` instead of `/opt/ovr/edge/`).
 
 ### Why
 - Prevents “works on one host but not another” due to env/config location mismatch.
 - Makes compose usage consistent (`.env` discovered automatically).
 
 ### Acceptance
-- Fresh provision results in `/etc/ovr` existing and the `/opt/*/.env` symlinks correct.
+- Fresh provision results in `/etc/ovr` existing and the `/opt/ovr/*/.env` symlinks correct.
 - Edge + cloud compose start without needing `--env-file`.
 
 ---
@@ -181,66 +201,67 @@ For each milestone:
 
 ---
 
-## Milestone 4c — GX MQTT ingestion via Telegraf (optional, incremental)
+## Milestone 4c — GX MQTT ingestion via Telegraf ✅
 **Branch:** `feat/4c-telegraf-gx-mqtt-ingest`
+**Status:** Complete (merged to main 2025-01-30)
 
-> This milestone is **optional** and can be staged in two parts:
-> - 4c.1: wiring + config disabled by default
-> - 4c.2: enable on specific nodes after validating GX topic formats
+### What (implemented)
+- Telegraf MQTT consumer reads from GX brokers on port 1883
+- Starlark processor (`telegraf/processors/victron_mqtt.star`) transforms raw MQTT topics into semantic metric names:
+  - Input: `N/<portal_id>/<service>/<instance>/<path...>`
+  - Output: `victron_<service>_<path>` with `service`, `instance`, `phase` tags
+- Config generated dynamically to `/etc/ovr/telegraf.d/gx_mqtt_sources.conf`
+- 136+ victron_* metrics verified flowing into VictoriaMetrics
 
-### What
-- Add Telegraf MQTT consumption (from one or more GX brokers) to write into local VM.
-- Keep existing exporter/vmagent flow intact until fully validated.
-- Keep MQTT ingest config **disabled by default** (e.g., `.disabled` file) until confirmed.
-
-### Why
-- Allows curated ingestion directly from GX MQTT without broker bridging.
-- Lets you choose only needed topics/fields.
-
-### Acceptance
-- With config disabled, nothing changes.
-- With config enabled on a test node:
-  - Telegraf reads GX MQTT topics
-  - writes metrics into local VM (`:8428/write` via Influx line protocol)
-  - does not explode cardinality
+### Acceptance ✅
+- Telegraf reads GX MQTT topics
+- Writes metrics into local VM
+- Cardinality controlled via Starlark processor (topic tag removed, encoded in metric name)
 
 ---
 
-## Milestone 4d — GX discovery automation (mDNS → generated Telegraf config)
+## Milestone 4d — GX discovery automation ✅
 **Branch:** `feat/4d-gx-mdns-discovery-autoconfig`
+**Status:** Complete (merged to main 2025-01-30)
 
-### What
-- Add a small “gx-discovery” helper service/script on the node that:
-  1) uses Avahi to browse for MQTT brokers (or your custom GX service type)
-  2) generates `/etc/telegraf/telegraf.d/90-gx-mqtt-auto.conf` from discovered brokers
-  3) triggers Telegraf reload/restart
-- Configure Avahi to listen only on intended interfaces (service subnet + optionally Wi‑Fi), not WAN.
-- Include a “do not reflect mDNS across subnets” default (no broadcast storms).
+### What (implemented)
+- **Allowlist-based discovery** instead of mDNS (GX devices don't advertise `_mqtt._tcp`)
+- `targets_gx.txt` contains hostname allowlist (mDNS `.local` names)
+- `scripts/refresh_gx_mqtt_sources.sh`:
+  1) Resolves hostnames via `getent hosts`
+  2) Checks MQTT port 1883 reachability
+  3) Discovers portal ID via `mosquitto_sub`
+  4) Generates `/etc/ovr/telegraf.d/gx_mqtt_sources.conf`
+- Systemd timer runs every 50 seconds
 
 ### Why
-- Lets your node act as the **central aggregation point** without bridging subnets.
-- Dynamic onboarding of “additional GX devices on Wi‑Fi” becomes realistic.
+- GX devices don't advertise MQTT via mDNS, so allowlist approach is more reliable
+- Still allows dynamic config generation based on what's reachable
 
-### Acceptance
-- Plug in GX or join same Wi‑Fi; node discovers it via mDNS on that interface.
-- Telegraf config updates and starts ingesting from that broker.
-- No subnet mDNS reflection unless explicitly enabled.
+### Acceptance ✅
+- Reachable GX devices get config generated
+- Unreachable devices are skipped (no stale configs)
+- Telegraf config updates automatically
 
 ---
 
-## Milestone 4e — GX MQTT keepalive helper (if needed for dbus-flashmq)
+## Milestone 4e — GX MQTT keepalive helper ✅
 **Branch:** `feat/4e-gx-mqtt-keepalive-helper`
+**Status:** Complete (merged to main 2025-01-30)
 
-### What
-- Add a tiny helper that sends the required keepalive/read request periodically to GX MQTT topics (with suppress-republish) so GX continues publishing.
-- Configurable list of GX portal IDs or discovered IDs.
+### What (implemented)
+- Keepalive integrated into `refresh_gx_mqtt_sources.sh` (not a separate service)
+- After discovering portal ID, sends `mosquitto_pub -t "R/${portal_id}/keepalive" -m ''`
+- Runs every 50 seconds via systemd timer (`ovr-refresh-gx-mqtt-sources.timer`)
+- Well under the 60-second GX timeout
 
 ### Why
-- Some GX MQTT modes won’t publish anything until keepalive is requested.
-- This avoids “it stopped publishing after a while” field issues.
+- GX MQTT requires periodic keepalive or it stops publishing
+- Combining with discovery script keeps it simple (one timer, one script)
 
-### Acceptance
-- On real GX devices, metrics continue publishing steadily without republish storms.
+### Acceptance ✅
+- GX devices continue publishing metrics steadily
+- No republish storms (empty message body)
 
 ---
 
@@ -326,10 +347,38 @@ This keeps mesh bandwidth under control and keeps responsibilities clear.
 ---
 
 ## Where to put configuration (suggested)
-- `/etc/ovr/edge.env` and `/etc/ovr/cloud.env` are canonical
-- `/etc/ovr/peers.json` for peer routing (phase 2)
-- `/etc/ovr/wifi_networks.csv` for known Wi‑Fi (phase 1)
-- `/etc/ovr/gx_mqtt_sources.json` (optional; if you prefer static GX broker list instead of mDNS discovery)
-- `/etc/telegraf/telegraf.d/90-gx-mqtt-auto.conf` generated file (phase 4d)
+
+### Directory structure
+```
+/opt/ovr/
+├── edge/          # Edge stack (field node)
+│   ├── .env -> /etc/ovr/edge.env
+│   ├── docker-compose.yml
+│   ├── scripts/
+│   ├── telegraf/
+│   └── systemd/
+└── cloud/         # Cloud stack (VPS)
+    ├── .env -> /etc/ovr/cloud.env
+    └── docker-compose.yml
+
+/etc/ovr/          # Canonical config home (persists across deploys)
+├── edge.env
+├── cloud.env
+├── telegraf.d/    # Generated Telegraf configs
+│   ├── gx_mqtt_sources.conf
+│   └── acuvim_*.conf
+├── targets_gx.txt       # GX device allowlist (optional override)
+├── targets_acuvim.txt   # ACUVIM IP list (optional override)
+├── peers.json           # Peer routing (Milestone 2)
+└── wifi_networks.csv    # Known Wi-Fi (Milestone 1)
+```
+
+### Config file locations
+- `/etc/ovr/edge.env` and `/etc/ovr/cloud.env` are canonical env files
+- `/etc/ovr/telegraf.d/` for generated Telegraf configs (Milestone 4c/4d)
+- `/etc/ovr/peers.json` for peer routing (Milestone 2)
+- `/etc/ovr/wifi_networks.csv` for known Wi‑Fi (Milestone 1)
+- `/etc/ovr/targets_gx.txt` for GX allowlist (overrides repo default)
+- `/etc/ovr/targets_acuvim.txt` for ACUVIM IPs (overrides repo default)
 
 ---
