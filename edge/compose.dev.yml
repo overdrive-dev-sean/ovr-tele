@@ -104,6 +104,7 @@ services:
     volumes:
       - event_data:/data
       - /etc/ovr/secrets:/etc/ovr/secrets:ro
+      - /etc/ovr/gx_systems.json:/etc/ovr/gx_systems.json:ro
     env_file:
       - .env
     environment:

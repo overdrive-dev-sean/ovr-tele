@@ -3791,6 +3791,114 @@ def api_gx_setting_set():
 
 
 # ============================================================================
+# Multi-System Dashboard
+# ============================================================================
+
+GX_SYSTEMS_FILE = "/etc/ovr/gx_systems.json"
+
+
+def load_gx_systems():
+    """Load the list of GX systems from the discovery file."""
+    try:
+        with open(GX_SYSTEMS_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("systems", []), data.get("updated_at")
+    except FileNotFoundError:
+        return [], None
+    except Exception as e:
+        logger.error(f"Error loading gx_systems.json: {e}")
+        return [], None
+
+
+def get_system_summary(system_id: str) -> dict:
+    """Get summary metrics for a single system."""
+    label = escape_prom_label_value(system_id)
+
+    soc = vm_query_scalar(f'victron_battery_soc_value{{system_id="{label}"}}')
+    if soc is None:
+        soc = vm_query_scalar(f'victron_system_dc_battery_soc_value{{system_id="{label}"}}')
+    pin = vm_query_scalar(f'victron_system_dc_battery_power_value{{system_id="{label}"}}')
+    if pin is None:
+        pin = vm_query_scalar(f'victron_ac_in_power_value{{system_id="{label}"}}')
+    pout = vm_query_scalar(f'victron_system_ac_consumption_power_value{{system_id="{label}"}}')
+    if pout is None:
+        pout = vm_query_scalar(f'victron_ac_out_power_value{{system_id="{label}"}}')
+    voltage = vm_query_scalar(f'victron_battery_voltage_value{{system_id="{label}"}}')
+    if voltage is None:
+        voltage = vm_query_scalar(f'victron_system_dc_battery_voltage_value{{system_id="{label}"}}')
+    mode = vm_query_scalar(f'victron_vebus_mode_value{{system_id="{label}"}}')
+
+    # Get last data timestamp
+    last_seen_result = vm_query_vector(f'victron_battery_soc_value{{system_id="{label}"}}')
+    last_seen = None
+    if last_seen_result:
+        ts = last_seen_result[0].get("value", [None])[0]
+        if ts:
+            last_seen = int(float(ts) * 1e9)
+
+    # Get alarm count
+    alarms_series = vm_query_vector(
+        f'max_over_time({{__name__=~"victron_.*alarm.*",system_id="{label}"}}[5m])'
+    )
+    alerts = []
+    for series in alarms_series:
+        value = _vm_value_to_float(series.get("value"))
+        if value is not None and value >= 0.5:
+            metric = series.get("metric", {})
+            name = metric.get("name") or metric.get("__name__", "alarm")
+            alerts.append(name)
+
+    return {
+        "system_id": system_id,
+        "soc": soc,
+        "pin": pin,
+        "pout": pout,
+        "voltage": voltage,
+        "mode": mode,
+        "alerts": sorted(set(alerts)),
+        "alerts_count": len(set(alerts)),
+        "last_seen": last_seen
+    }
+
+
+@app.route("/api/systems", methods=["GET"])
+def api_systems():
+    """Get list of discovered GX systems."""
+    systems, updated_at = load_gx_systems()
+    resp = jsonify({
+        "systems": systems,
+        "updated_at": updated_at,
+        "count": len(systems)
+    })
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+@app.route("/api/dashboard", methods=["GET"])
+def api_dashboard():
+    """Get summary metrics for all discovered systems."""
+    systems, updated_at = load_gx_systems()
+
+    summaries = []
+    for sys in systems:
+        system_id = sys.get("system_id")
+        if not system_id:
+            continue
+        summary = get_system_summary(system_id)
+        summary["ip"] = sys.get("ip")
+        summary["portal_id"] = sys.get("portal_id")
+        summaries.append(summary)
+
+    resp = jsonify({
+        "systems": summaries,
+        "discovery_updated_at": updated_at,
+        "count": len(summaries)
+    })
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+# ============================================================================
 # Web UI
 # ============================================================================
 

@@ -239,4 +239,28 @@ EOF
 mv "${tmp_file}" "${OUT_FILE}"
 chmod 0644 "${OUT_FILE}"
 
-echo "SUMMARY: added=${added} skipped=${skipped} -> ${OUT_FILE}"
+# Generate gx_systems.json for backend/frontend system discovery
+SYSTEMS_FILE="${OVR_DIR}/gx_systems.json"
+systems_tmp="$(mktemp)"
+{
+  echo '{'
+  echo '  "systems": ['
+  first=true
+  for entry in "${brokers[@]}"; do
+    IFS='|' read -r system_id ip portal_id <<< "${entry}"
+    if [ "$first" = true ]; then
+      first=false
+    else
+      echo ','
+    fi
+    printf '    {"system_id": "%s", "ip": "%s", "portal_id": "%s"}' "$system_id" "$ip" "$portal_id"
+  done
+  echo ''
+  echo '  ],'
+  printf '  "updated_at": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo '}'
+} > "${systems_tmp}"
+mv "${systems_tmp}" "${SYSTEMS_FILE}"
+chmod 0644 "${SYSTEMS_FILE}"
+
+echo "SUMMARY: added=${added} skipped=${skipped} -> ${OUT_FILE}, ${SYSTEMS_FILE}"
