@@ -309,7 +309,7 @@ Endpoint tested - returns 401 without auth (correct). Ready to receive data.
 - Dev password: `ovr-bridge` / `devpassword123`
 
 **Edge side DONE:**
-1. ✅ Events service publishes to `ovr/n100-01/realtime` every 5s
+1. ✅ Events service publishes to `ovr/<node_id>/realtime` every 5s
 2. ✅ Bridge config added, mqtt-broker on host network
 3. ✅ Bridge forwards `ovr/#` to cloud broker
 

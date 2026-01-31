@@ -193,7 +193,7 @@ They are not applied automatically unless you run the scripts manually.
 --deployment-id
 fleet
 --node-id
-n100-01
+node-04
 --remote-write-url
 https://metrics.example.com/api/v1/write
 --remote-write-user
@@ -240,7 +240,7 @@ These are copied to `/etc/ovr/secrets/` during install. Use file paths in
 - `/etc/ovr/secrets/*` (remote write password file)
 
 `DEPLOYMENT_ID` is a static fleet/group label for metrics (not the event ID used in the webapp).
-`NODE_ID` should describe the physical node (e.g., `zima-01`, `n100-01`).
+`NODE_ID` should describe the physical node (e.g., `zima-01`, `node-04`).
 
 ## Bootstrap (one command)
 
@@ -249,7 +249,7 @@ Run from the repo root on the N100:
 ```bash
 sudo bash provisioning/edge/bootstrap_n100.sh \
   --deployment-id fleet \
-  --node-id n100-01 \
+  --node-id node-04 \
   --lan-mode dhcp \
   --lan-if enp3s0 \
   --remote-write-url https://metrics.example.com/api/v1/write \
@@ -266,7 +266,7 @@ You can supply targets explicitly:
 ```bash
 sudo bash provisioning/edge/bootstrap_n100.sh \
   --deployment-id fleet \
-  --node-id n100-01 \
+  --node-id node-04 \
   --targets "node_exporter=node_exporter:9100,event_service=events:8088"
 ```
 
@@ -275,7 +275,7 @@ Or provide a full file:
 ```bash
 sudo bash provisioning/edge/bootstrap_n100.sh \
   --deployment-id fleet \
-  --node-id n100-01 \
+  --node-id node-04 \
   --targets-file /path/to/targets.yml
 ```
 
