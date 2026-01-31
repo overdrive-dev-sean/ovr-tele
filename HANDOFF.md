@@ -281,10 +281,15 @@ Endpoint tested - returns 401 without auth (correct). Ready to receive data.
 - ACL: authenticated users can pub/sub, anonymous can read-only
 - Dev password: `ovr-bridge` / `devpassword123`
 
-**Edge side TODO:**
-1. Events service publishes summary to local `ovr/<node_id>/realtime` topic
-2. Add bridge config to edge Mosquitto (see `cloud/mosquitto/README.md`)
-3. Bridge forwards `ovr/#` to cloud broker
+**Edge side DONE:**
+1. ✅ Events service publishes to `ovr/n100-01/realtime` every 5s
+2. ✅ Bridge config added, mqtt-broker on host network
+3. ✅ Bridge forwards `ovr/#` to cloud broker
+
+**Cloud Claude:** Verify data arriving on cloud broker:
+```bash
+mosquitto_sub -h localhost -t 'ovr/#' -v
+```
 
 **Topic schema:**
 - `ovr/<node_id>/realtime` - System summary (SOC, voltage, power, mode)
