@@ -2317,16 +2317,16 @@ def _load_nodes(
     lookback = f"{LOOKBACK_SECONDS}s"
 
     lat_series = _vm_query_vector(
-        f"last_over_time({_metric_name('victron_gps_latitude')}{selector}[{lookback}])"
+        f"last_over_time({_metric_name('victron_gps_position_latitude_value')}{selector}[{lookback}])"
     )
     lon_series = _vm_query_vector(
-        f"last_over_time({_metric_name('victron_gps_longitude')}{selector}[{lookback}])"
+        f"last_over_time({_metric_name('victron_gps_position_longitude_value')}{selector}[{lookback}])"
     )
     soc_series = _vm_query_vector(
-        f"last_over_time({_metric_name('victron_battery_soc')}{selector}[{lookback}])"
+        f"last_over_time({_metric_name('victron_battery_soc_value')}{selector}[{lookback}])"
     )
     pout_series = _vm_query_vector(
-        f"last_over_time({_metric_name('victron_ac_out_power')}{selector}[{lookback}])"
+        f"last_over_time({_metric_name('victron_vebus_ac_out_p_value')}{selector}[{lookback}])"
     )
 
     alarm_selector = _build_selector(
