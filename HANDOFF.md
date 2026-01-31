@@ -258,9 +258,16 @@ When working in tandem:
 - **Working on:** Integration verified
 - **Blocked by:** (nothing)
 - **Notes:**
-  - ✅ Remote write confirmed - receiving `acuvim_*:10s_avg` and `victron_*:10s_avg` metrics
-  - ✅ MQTT broker running, waiting for edge bridge connection
-  - Next: Fleet map UI WebSocket integration once edge MQTT bridge is active
+  - ✅ Remote write confirmed - receiving metrics
+  - ✅ MQTT broker running on port 1883
+  - ✅ Firewall opened for port 1883 (was blocking before)
+  - ⏳ No edge MQTT data yet - edge may need to restart mqtt-broker
+
+**Edge action:** If bridge isn't connecting, try:
+```bash
+docker compose -f /opt/ovr/edge/compose.dev.yml restart mqtt-broker
+docker compose -f /opt/ovr/edge/compose.dev.yml logs mqtt-broker --tail 20
+```
 
 **Remote Write Details for Edge:**
 ```
