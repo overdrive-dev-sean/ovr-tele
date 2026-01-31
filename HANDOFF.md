@@ -235,23 +235,20 @@ When working in tandem:
 *Update this section as you work*
 
 ### Edge Claude
-- **Working on:** Edge→Cloud pipeline complete ✓
+- **Working on:** All edge→cloud integration complete ✓
 - **Blocked by:** (nothing)
 - **Notes:**
   - ✅ Victron federation working (1609 samples/scrape)
   - ✅ Stream aggregation producing :10s_avg metrics
-  - ✅ Local writes working
-  - ✅ Cloud remote write working (vmagent switched to host network)
-  - ✅ MQTT bridge config added (needs container restart)
-  - ✅ Events service local MQTT publisher added (needs rebuild)
+  - ✅ Cloud remote write working
+  - ✅ MQTT bridge CONNECTED to cloud
+  - ✅ Realtime data flowing (`ovr/n100-01/realtime`)
 
-  **Remaining deployment:**
-  ```bash
-  # Restart MQTT broker to pick up bridge config
-  docker compose -f /opt/ovr/edge/compose.dev.yml restart mqtt-broker
-
-  # Rebuild events service for local MQTT publisher
-  docker compose -f /opt/ovr/edge/compose.dev.yml up -d --build events
+  Bridge logs confirm:
+  ```
+  Received CONNACK on connection local.node-04.cloud-bridge
+  Sending PUBLISH to local.node-04.cloud-bridge (ovr/n100-01/realtime)
+  Received PUBACK from local.node-04.cloud-bridge
   ```
 
 ### Cloud Claude
