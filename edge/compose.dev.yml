@@ -92,6 +92,16 @@ services:
       - --watch-config
       - poll
 
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: mqtt-broker
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt_data:/mosquitto/data
+    # Internal only - no host ports exposed
+    # Other containers reach it via mqtt-broker:1883
+    restart: unless-stopped
+
   events:
     build:
       context: ./services/events
@@ -99,6 +109,7 @@ services:
     container_name: events
     depends_on:
       - victoria-metrics
+      - mqtt-broker
     network_mode: host
     volumes:
       - event_data:/data
@@ -131,3 +142,4 @@ volumes:
   grafana:
   vmagent_tmp:
   event_data:
+  mqtt_data:
