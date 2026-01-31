@@ -421,6 +421,34 @@ Implementation: Added MQTT subscriber to Flask API (background thread in `app.py
 
 ---
 
+## Active Experiments
+
+### Cloudflare Tunnel Failover (2026-01-31)
+
+**Problem:** When WiFi drops and NetworkManager fails over to LTE modem, cloudflared tunnel dies and won't reconnect.
+
+**Root cause:** cloudflared uses QUIC (UDP) by default. QUIC doesn't handle route changes well, and LTE networks often have UDP issues (blocking, throttling, MTU problems).
+
+**Fix being tested:** Force HTTP/2 (TCP) instead of QUIC.
+
+**Change made:**
+```bash
+# /etc/systemd/system/cloudflared.service
+# Added --protocol http2 to ExecStart:
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --protocol http2 run --token <token>
+```
+
+**Status:** In testing. Manual run with `--protocol http2` worked immediately. Service file updated, need to verify failover works cleanly now.
+
+**To verify:**
+1. Confirm service is running with http2: `journalctl -u cloudflared | grep "Initial protocol"`
+2. Simulate failover (disable WiFi, verify tunnel reconnects over LTE)
+3. If still failing, check if a NetworkManager dispatcher script is needed to restart cloudflared on interface changes
+
+**Rollback:** Remove `--protocol http2` from the ExecStart line if this causes other issues.
+
+---
+
 ## Quick Reference
 
 ### Edge commands
