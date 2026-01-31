@@ -2660,6 +2660,64 @@ def get_realtime_summary() -> Dict[str, Any]:
         return result
 
 
+# Local MQTT broker address (internal Docker network)
+LOCAL_MQTT_BROKER = os.environ.get("LOCAL_MQTT_BROKER", "mqtt-broker")
+LOCAL_MQTT_PORT = int(os.environ.get("LOCAL_MQTT_PORT", "1883"))
+
+
+def _mqtt_local_publish_worker() -> None:
+    """Background worker that publishes realtime summary to local MQTT broker.
+
+    This data gets bridged to cloud for fleet map realtime updates.
+    Topic: ovr/<node_id>/realtime
+    """
+    if not PAHO_AVAILABLE:
+        logger.warning("paho-mqtt not available, local MQTT publish disabled")
+        return
+
+    node_id = NODE_ID or SYSTEM_ID or "unknown"
+    topic = f"ovr/{node_id}/realtime"
+    publish_interval = 5  # seconds
+
+    client = None
+    while not _heartbeat_stop.is_set():
+        try:
+            # Connect to local broker if not connected
+            if client is None:
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                client.connect(LOCAL_MQTT_BROKER, LOCAL_MQTT_PORT, keepalive=60)
+                client.loop_start()
+                logger.info(f"Local MQTT publisher connected to {LOCAL_MQTT_BROKER}:{LOCAL_MQTT_PORT}")
+
+            # Get current realtime summary and publish
+            summary = get_realtime_summary()
+            if summary.get("systems"):
+                payload = json.dumps(summary)
+                client.publish(topic, payload, qos=1, retain=True)
+                logger.debug(f"Published realtime to {topic}: {len(summary['systems'])} systems")
+
+            _heartbeat_stop.wait(publish_interval)
+
+        except Exception as e:
+            logger.warning(f"Local MQTT publish error: {e}")
+            if client:
+                try:
+                    client.loop_stop()
+                    client.disconnect()
+                except:
+                    pass
+                client = None
+            _heartbeat_stop.wait(10)
+
+    # Cleanup on shutdown
+    if client:
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except:
+            pass
+
+
 @app.route("/api/realtime", methods=["GET"])
 def api_realtime():
     """Get realtime summary from MQTT cache (no VictoriaMetrics query)."""
@@ -6887,6 +6945,11 @@ if PAHO_AVAILABLE:
     mqtt_realtime_thread = threading.Thread(target=_mqtt_realtime_worker, daemon=True, name="mqtt-realtime")
     mqtt_realtime_thread.start()
     logger.info("MQTT realtime worker started")
+
+    # Start local MQTT publisher thread (bridges to cloud for fleet map)
+    mqtt_local_publish_thread = threading.Thread(target=_mqtt_local_publish_worker, daemon=True, name="mqtt-local-publish")
+    mqtt_local_publish_thread.start()
+    logger.info("Local MQTT publisher started (topic: ovr/<node_id>/realtime)")
 else:
     logger.warning("paho-mqtt not installed, realtime MQTT updates disabled")
 
