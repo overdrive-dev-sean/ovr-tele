@@ -93,7 +93,9 @@ services:
       - poll
 
   events:
-    build: ./services/events
+    build:
+      context: ./services/events
+      network: host
     container_name: events
     depends_on:
       - victoria-metrics
@@ -110,7 +112,11 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./services/frontend
+    build:
+      context: ./services/frontend
+      # Use host network during build so npm can resolve DNS
+      # (Docker bridge networking broken on this host - see CLAUDE.md)
+      network: host
     container_name: frontend
     depends_on:
       - events

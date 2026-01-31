@@ -113,6 +113,37 @@ sudo docker run --rm --network edge_default nicolaka/netshoot   sh -lc 'ping -c1
 - Prefer one command per line; avoid `sudo -i` blocks in docs (they can hide failures mid-block).
 - For nftables strings/wildcards/comments, prefer `nft -f` heredocs so quoting is unambiguous (avoid silent no-ops).
 
+## Known issues / workarounds
+
+### Docker bridge networking broken on some hosts
+
+On hosts where Tailscale or other VPN tools manage `/etc/resolv.conf`, Docker's default bridge networking may fail to route outbound traffic (containers can't reach the internet even though the host can).
+
+**Symptoms:**
+- `docker run --rm alpine ping 1.1.1.1` → 100% packet loss
+- `docker build` fails with `getaddrinfo EAI_AGAIN` during `npm install`
+- Host networking works fine: `docker run --rm --network=host alpine nslookup google.com`
+
+**Workaround for builds:** Use `network: host` in compose build config:
+```yaml
+services:
+  frontend:
+    build:
+      context: ./services/frontend
+      network: host
+```
+
+**Workaround for runtime:** Add explicit DNS to services:
+```yaml
+services:
+  myservice:
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+```
+
+The root cause is likely iptables/nftables FORWARD chain rules or NAT not applying correctly to Docker bridge traffic. A proper fix would require debugging the firewall ruleset.
+
 ## Testing expectations
 
 Before opening a PR, run:
