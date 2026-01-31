@@ -235,9 +235,12 @@ When working in tandem:
 *Update this section as you work*
 
 ### Edge Claude
-- **Working on:** Standing by for coordination
-- **Blocked by:** (nothing)
-- **Notes:** All branches merged, clean state. Ready to work on edge services, Telegraf, or integration testing.
+- **Working on:** Stream aggregation fix complete, ready to deploy
+- **Blocked by:** Need sudo to copy configs to /etc/ovr/
+- **Notes:** Committed fix for victron_* stream aggregation. Deployment command:
+  ```
+  sudo cp edge/vmagent/*.yml /etc/ovr/ && docker compose -f edge/compose.dev.yml restart vmagent
+  ```
 
 ### Cloud Claude
 - **Working on:** Initial setup complete, reviewing integration points
