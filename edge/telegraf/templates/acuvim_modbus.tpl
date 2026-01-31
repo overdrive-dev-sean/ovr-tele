@@ -1,6 +1,6 @@
 [[inputs.modbus]]
   name = "acuvim2r"
-  interval = "100ms"
+  interval = "__INTERVAL__"
   controller = "tcp://__IP__:502"
   slave_id = 1
 

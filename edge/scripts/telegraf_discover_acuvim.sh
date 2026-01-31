@@ -26,6 +26,16 @@ fi
 
 mkdir -p "${OUT_DIR}"
 
+# Polling interval based on network - WiFi (10.100.x.x) is slower
+get_interval() {
+  local ip="$1"
+  if [[ "${ip}" =~ ^10\.100\. ]]; then
+    echo "1s"  # WiFi - conservative
+  else
+    echo "50ms"  # Wired switch plane - fast
+  fi
+}
+
 is_up() {
   local ip="$1"
   timeout 1 bash -lc "cat < /dev/null > /dev/tcp/${ip}/502" >/dev/null 2>&1
@@ -54,9 +64,11 @@ while read -r ip; do
 
   if is_up "${ip}"; then
     tmp="$(mktemp)"
+    interval="$(get_interval "${ip}")"
     sed \
       -e "s/__IP__/${ip}/g" \
       -e "s/__DEVICE__/${device}/g" \
+      -e "s/__INTERVAL__/${interval}/g" \
       "${TPL}" > "${tmp}"
     chmod 0644 "${tmp}"
 
