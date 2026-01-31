@@ -2660,8 +2660,8 @@ def get_realtime_summary() -> Dict[str, Any]:
         return result
 
 
-# Local MQTT broker address (internal Docker network)
-LOCAL_MQTT_BROKER = os.environ.get("LOCAL_MQTT_BROKER", "mqtt-broker")
+# Local MQTT broker address (localhost since events runs on host network)
+LOCAL_MQTT_BROKER = os.environ.get("LOCAL_MQTT_BROKER", "localhost")
 LOCAL_MQTT_PORT = int(os.environ.get("LOCAL_MQTT_PORT", "1883"))
 
 

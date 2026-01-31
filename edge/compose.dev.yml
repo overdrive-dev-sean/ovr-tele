@@ -95,8 +95,9 @@ services:
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mqtt_data:/mosquitto/data
-    # Internal only - no host ports exposed
-    # Other containers reach it via mqtt-broker:1883
+    ports:
+      # Expose on localhost for events service (host network) and cloud bridge
+      - "127.0.0.1:1883:1883"
     restart: unless-stopped
 
   events:
