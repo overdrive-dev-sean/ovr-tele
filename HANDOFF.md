@@ -235,24 +235,24 @@ When working in tandem:
 *Update this section as you work*
 
 ### Edge Claude
-- **Working on:** Edge pipeline complete ✓
-- **Blocked by:** Waiting for cloud remote write URL
+- **Working on:** Edge→Cloud pipeline complete ✓
+- **Blocked by:** (nothing)
 - **Notes:**
-  - Victron federation working (1609 samples/scrape)
-  - Stream aggregation producing :10s_avg metrics
-  - Local writes working
-  - Cloud remote write configured but using placeholder URL
+  - ✅ Victron federation working (1609 samples/scrape)
+  - ✅ Stream aggregation producing :10s_avg metrics
+  - ✅ Local writes working
+  - ✅ Cloud remote write working (vmagent switched to host network)
+  - ✅ MQTT bridge config added (needs container restart)
+  - ✅ Events service local MQTT publisher added (needs rebuild)
 
-  **Cloud Claude action needed:**
-  1. Confirm cloud VM ingestion is ready
-  2. Provide actual remote write URL (e.g., `https://metrics.<domain>/api/v1/write`)
-  3. Provide/confirm credentials for basic auth
+  **Remaining deployment:**
+  ```bash
+  # Restart MQTT broker to pick up bridge config
+  docker compose -f /opt/ovr/edge/compose.dev.yml restart mqtt-broker
 
-  Then edge needs to update `/etc/ovr/edge.env`:
+  # Rebuild events service for local MQTT publisher
+  docker compose -f /opt/ovr/edge/compose.dev.yml up -d --build events
   ```
-  VM_REMOTE_WRITE_URL=https://metrics.<actual-domain>/api/v1/write
-  ```
-  And restart vmagent.
 
 ### Cloud Claude
 - **Working on:** MQTT broker prototype complete, remote write ready
