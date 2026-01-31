@@ -2426,6 +2426,20 @@ def tile_usage_sync_worker() -> None:
 _realtime_cache: Dict[str, Dict[str, Any]] = {}
 _realtime_lock = threading.Lock()
 
+# Thread-safe cache for realtime GX control settings from MQTT
+# Format: {system_id: {setting_name: {"value": X, "ts": timestamp_ms}}}
+_control_cache: Dict[str, Dict[str, Any]] = {}
+_control_lock = threading.Lock()
+
+# Control settings MQTT paths (service/path format, instance is wildcard)
+# These map MQTT paths to setting names in GX_SETTINGS
+CONTROL_TOPIC_PATHS = {
+    "Dc/0/MaxChargeCurrent": "battery_charge_current",
+    "Mode": "inverter_mode",
+    "Ac/ActiveIn/CurrentLimit": "ac_input_current_limit",
+    "Settings/InverterOutputVoltage": "inverter_output_voltage",
+}
+
 # Map GX MQTT topic paths to our summary fields
 # Topic format: N/<portal_id>/<service>/<instance>/<path...>
 REALTIME_TOPIC_MAP = {
@@ -2491,6 +2505,17 @@ def _compute_realtime_totals(system_id: str) -> None:
         cache["pout"] = pout if pout != 0 else cache.get("pout")
 
 
+def _update_control_cache(system_id: str, setting_name: str, value: Any) -> None:
+    """Update a control setting in the cache."""
+    with _control_lock:
+        if system_id not in _control_cache:
+            _control_cache[system_id] = {}
+        _control_cache[system_id][setting_name] = {
+            "value": value,
+            "ts": int(time.time() * 1000)
+        }
+
+
 def _on_mqtt_message(client, userdata, msg):
     """Handle incoming MQTT messages from GX devices."""
     try:
@@ -2503,6 +2528,7 @@ def _on_mqtt_message(client, userdata, msg):
         service = parts[2]
         instance = parts[3]
         path = "/".join(parts[2:])  # service/instance/path...
+        subpath = "/".join(parts[4:]) if len(parts) > 4 else ""  # path after instance
 
         # Look up system by portal_id
         system = _get_system_by_portal(portal_id)
@@ -2510,11 +2536,6 @@ def _on_mqtt_message(client, userdata, msg):
             return
         system_id = system.get("system_id")
         if not system_id:
-            return
-
-        # Check if this path maps to a summary field
-        field = REALTIME_TOPIC_MAP.get(path)
-        if not field:
             return
 
         # Parse JSON value
@@ -2526,12 +2547,19 @@ def _on_mqtt_message(client, userdata, msg):
         except (json.JSONDecodeError, UnicodeDecodeError):
             return
 
-        # Update cache
-        _update_realtime_cache(system_id, field, value)
+        # Check if this path maps to a summary field
+        field = REALTIME_TOPIC_MAP.get(path)
+        if field:
+            _update_realtime_cache(system_id, field, value)
+            # Recompute totals if we got a phase value
+            if field.startswith("pin_") or field.startswith("pout_"):
+                _compute_realtime_totals(system_id)
+            return
 
-        # Recompute totals if we got a phase value
-        if field.startswith("pin_") or field.startswith("pout_"):
-            _compute_realtime_totals(system_id)
+        # Check if this is a vebus control setting
+        if service == "vebus" and subpath in CONTROL_TOPIC_PATHS:
+            setting_name = CONTROL_TOPIC_PATHS[subpath]
+            _update_control_cache(system_id, setting_name, value)
 
     except Exception as e:
         logger.debug(f"Error processing MQTT message: {e}")
@@ -2568,6 +2596,11 @@ def _mqtt_realtime_worker() -> None:
                     # Subscribe to relevant topics
                     for topic_path in REALTIME_TOPIC_MAP.keys():
                         topic = f"N/{portal_id}/{topic_path}"
+                        client.subscribe(topic)
+
+                    # Subscribe to vebus control settings (wildcard instance)
+                    for subpath in CONTROL_TOPIC_PATHS.keys():
+                        topic = f"N/{portal_id}/vebus/+/{subpath}"
                         client.subscribe(topic)
 
                     client.loop_start()
@@ -4111,6 +4144,66 @@ def api_gx_settings_get():
     return jsonify(settings)
 
 
+@app.route("/api/gx/settings/realtime", methods=["GET"])
+def api_gx_settings_realtime():
+    """Get current GX control settings from realtime MQTT cache with VM fallback.
+
+    Returns cached values from direct MQTT subscription to GX devices.
+    Falls back to VictoriaMetrics for settings not yet in the cache.
+    """
+    if not check_api_key():
+        return jsonify({"error": "Invalid API key"}), 401
+
+    system_id = canonicalize_system_id(request.args.get("system_id", "").strip() or SYSTEM_ID)
+    label = escape_prom_label_value(system_id)
+
+    with _control_lock:
+        cached = _control_cache.get(system_id, {})
+
+    # Map settings to their VictoriaMetrics metric names for fallback
+    metric_map = {
+        "battery_charge_current": "victron_vebus_dc_0_maxchargecurrent_value",
+        "inverter_mode": "victron_vebus_mode_value",
+        "ac_input_current_limit": "victron_vebus_ac_activein_currentlimit_value",
+        "inverter_output_voltage": "victron_vebus_settings_inverteroutputvoltage_value"
+    }
+
+    # Build response - prefer realtime cache, fall back to VM
+    settings = {}
+    for key in GX_SETTINGS.keys():
+        if key in cached:
+            # Use realtime cached value from MQTT
+            settings[key] = {
+                "value": cached[key]["value"],
+                "description": GX_SETTINGS[key]["description"],
+                "updated_at": cached[key]["ts"] * 1_000_000,  # Convert ms to ns
+                "source": "mqtt"
+            }
+        else:
+            # Fall back to VictoriaMetrics
+            settings[key] = {
+                "value": None,
+                "description": GX_SETTINGS[key]["description"],
+                "updated_at": None,
+                "source": "none"
+            }
+            if key in metric_map:
+                try:
+                    query = f'{metric_map[key]}{{system_id="{label}"}}'
+                    resp = requests.get(f"{VM_QUERY_URL}/api/v1/query", params={"query": query}, timeout=3)
+                    if resp.status_code == 200:
+                        results = resp.json().get("data", {}).get("result", [])
+                        if results:
+                            latest = max(results, key=lambda r: float(r["value"][0]))
+                            settings[key]["value"] = float(latest["value"][1])
+                            settings[key]["updated_at"] = int(float(latest["value"][0]) * 1e9)
+                            settings[key]["source"] = "vm"
+                except Exception as e:
+                    logger.debug(f"VM fallback failed for {key}: {e}")
+
+    return jsonify(settings)
+
+
 @app.route("/api/gx/setting", methods=["POST"])
 def api_gx_setting_set():
     """Set a GX device setting via MQTT."""
@@ -4178,6 +4271,8 @@ def api_gx_setting_set():
     success, message = mqtt_write_setting(ip, portal_id, instance, mqtt_path, value)
 
     if success:
+        # Don't optimistically cache - wait for actual MQTT confirmation from GX device
+        # Frontend does its own optimistic UI update
         return jsonify({
             "message": message,
             "setting": setting_name,
