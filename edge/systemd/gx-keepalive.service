@@ -1,0 +1,11 @@
+[Unit]
+Description=Send MQTT keepalives to GX systems
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ovr/edge/scripts/gx_keepalive.sh
+User=root
+
+[Install]
+WantedBy=multi-user.target
