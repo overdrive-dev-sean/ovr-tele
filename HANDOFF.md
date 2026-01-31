@@ -263,11 +263,13 @@ When working in tandem:
   - ✅ Firewall opened for port 1883 (was blocking before)
   - ⏳ No edge MQTT data yet - edge may need to restart mqtt-broker
 
-**Edge status:** Bridge can't connect - port 1883 not reachable from edge:
-```
-nc -zv 5.78.73.219 1883  # times out
-```
-Cloud Claude: verify `ufw status` shows 1883 open, and that Mosquitto is binding to 0.0.0.0:1883 not just localhost.
+**MQTT Bridge Status:**
+- ✅ Hetzner Cloud Firewall opened for TCP 1883
+- ✅ Edge bridge connected: `node-04.cloud-bridge` from `108.205.10.185`
+- ⏳ No realtime data yet - edge events service may need rebuild:
+  ```bash
+  docker compose -f /opt/ovr/edge/compose.dev.yml up -d --build events
+  ```
 
 **Remote Write Details for Edge:**
 ```
