@@ -2635,23 +2635,38 @@ def _mqtt_realtime_worker() -> None:
 
 
 def get_realtime_summary() -> Dict[str, Any]:
-    """Get the current realtime summary for all systems."""
+    """Get the current realtime summary for all systems (GX and ACUVIM)."""
     with _realtime_lock:
         result = {
             "systems": [],
             "ts": int(time.time() * 1000)
         }
         for system_id, data in _realtime_cache.items():
-            # Build clean summary
-            summary = {
-                "system_id": system_id,
-                "soc": data.get("soc"),
-                "voltage": data.get("voltage"),
-                "pin": data.get("pin"),
-                "pout": data.get("pout"),
-                "mode": data.get("mode"),
-                "ts": data.get("ts", 0),
-            }
+            system_type = data.get("type", "gx")
+
+            if system_type == "acuvim":
+                # ACUVIM power meter summary
+                summary = {
+                    "system_id": system_id,
+                    "type": "acuvim",
+                    "vln": data.get("vln"),        # Average line-neutral voltage
+                    "i_avg": data.get("i_avg"),    # Average current
+                    "p_total": data.get("p_total"),  # Total power (W)
+                    "ts": data.get("ts", 0),
+                }
+            else:
+                # GX/BESS summary (default)
+                summary = {
+                    "system_id": system_id,
+                    "type": "gx",
+                    "soc": data.get("soc"),
+                    "voltage": data.get("voltage"),
+                    "pin": data.get("pin"),
+                    "pout": data.get("pout"),
+                    "mode": data.get("mode"),
+                    "ts": data.get("ts", 0),
+                }
+
             # Check staleness (> 60s = stale)
             age_ms = result["ts"] - summary["ts"]
             summary["stale"] = age_ms > 60000
@@ -2716,6 +2731,81 @@ def _mqtt_local_publish_worker() -> None:
             client.disconnect()
         except:
             pass
+
+
+# ============================================================================
+# ACUVIM Realtime Polling (query VictoriaMetrics for Modbus data)
+# ============================================================================
+
+def _acuvim_realtime_worker() -> None:
+    """Background worker that polls VictoriaMetrics for ACUVIM metrics.
+
+    ACUVIM data comes via Modbus->Telegraf->VM, not MQTT, so we poll VM.
+    Updates the realtime cache with ACUVIM systems (type="acuvim").
+    """
+    poll_interval = 5  # seconds
+
+    while not _heartbeat_stop.is_set():
+        try:
+            # Query for distinct ACUVIM system_ids
+            systems_query = 'group by (system_id) (acuvim_P{system_id=~"acuvim.*"})'
+            resp = requests.get(
+                f"{VM_QUERY_URL}/api/v1/query",
+                params={"query": systems_query},
+                timeout=5
+            )
+
+            if resp.status_code != 200:
+                logger.warning(f"ACUVIM systems query failed: {resp.status_code}")
+                _heartbeat_stop.wait(poll_interval)
+                continue
+
+            results = resp.json().get("data", {}).get("result", [])
+            system_ids = [r.get("metric", {}).get("system_id") for r in results]
+            system_ids = [s for s in system_ids if s]  # Filter None
+
+            for system_id in system_ids:
+                # Query key metrics for this ACUVIM
+                metrics = {}
+                label = escape_prom_label_value(system_id)
+
+                for metric_name, field in [
+                    ("acuvim_Vln", "vln"),      # Average line-neutral voltage
+                    ("acuvim_I", "i_avg"),      # Average current
+                    ("acuvim_P", "p_total"),    # Total power (W)
+                ]:
+                    query = f'{metric_name}{{system_id="{label}"}}'
+                    try:
+                        r = requests.get(
+                            f"{VM_QUERY_URL}/api/v1/query",
+                            params={"query": query},
+                            timeout=3
+                        )
+                        if r.status_code == 200:
+                            data = r.json().get("data", {}).get("result", [])
+                            if data:
+                                val = data[0].get("value", [None, None])[1]
+                                if val is not None:
+                                    metrics[field] = float(val)
+                    except Exception as e:
+                        logger.debug(f"ACUVIM metric query error {metric_name}: {e}")
+
+                # Update realtime cache with ACUVIM data
+                if metrics:
+                    with _realtime_lock:
+                        if system_id not in _realtime_cache:
+                            _realtime_cache[system_id] = {"system_id": system_id}
+                        _realtime_cache[system_id]["type"] = "acuvim"
+                        _realtime_cache[system_id].update(metrics)
+                        _realtime_cache[system_id]["ts"] = int(time.time() * 1000)
+
+            if system_ids:
+                logger.debug(f"ACUVIM realtime updated: {len(system_ids)} systems")
+
+        except Exception as e:
+            logger.warning(f"ACUVIM realtime worker error: {e}")
+
+        _heartbeat_stop.wait(poll_interval)
 
 
 @app.route("/api/realtime", methods=["GET"])
@@ -6952,6 +7042,11 @@ if PAHO_AVAILABLE:
     logger.info("Local MQTT publisher started (topic: ovr/<node_id>/realtime)")
 else:
     logger.warning("paho-mqtt not installed, realtime MQTT updates disabled")
+
+# Start ACUVIM realtime polling thread (polls VM for Modbus data)
+acuvim_realtime_thread = threading.Thread(target=_acuvim_realtime_worker, daemon=True, name="acuvim-realtime")
+acuvim_realtime_thread.start()
+logger.info("ACUVIM realtime worker started")
 
 if __name__ == "__main__":
     # Only used for local development: python app.py

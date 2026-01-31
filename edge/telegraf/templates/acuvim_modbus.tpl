@@ -45,9 +45,6 @@
     ]
 
     [inputs.modbus.request.tags]
-      device = "__DEVICE__"
+      system_id = "__DEVICE__"
       ip = "__IP__"
       role = "power_meter"
-      location = "site_1"
-      node_id = "${NODE_ID}"
-      deployment_id = "${DEPLOYMENT_ID}"

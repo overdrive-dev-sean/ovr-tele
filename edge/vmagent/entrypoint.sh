@@ -28,9 +28,9 @@ set -- /vmagent-prod \
   -httpListenAddr="$HTTP_LISTEN_ADDR"
 
 # Apply identity labels to ALL outgoing series (cloud + local)
+# Note: system_id is NOT added globally - it comes from per-metric tags (ACUVIM, GX, etc.)
 [ -n "${DEPLOYMENT_ID:-}" ] && set -- "$@" -remoteWrite.label="deployment_id=$DEPLOYMENT_ID"
 [ -n "${NODE_ID:-}" ]       && set -- "$@" -remoteWrite.label="node_id=$NODE_ID"
-[ -n "${SYSTEM_ID:-}" ]     && set -- "$@" -remoteWrite.label="system_id=$SYSTEM_ID"
 [ -n "${STACK_NAME:-}" ]    && set -- "$@" -remoteWrite.label="stack_name=$STACK_NAME"
 
 # Enable GLOBAL stream aggregation (creates :10s_avg series)

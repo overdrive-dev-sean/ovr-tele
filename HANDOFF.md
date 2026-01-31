@@ -203,10 +203,11 @@ See `CLAUDE.md` for full technical context.
 
 ### Known Issues / Needs Work
 
-1. **Remote write pipeline** - Stream aggr config only matches ACUVIM, not victron_* metrics from Telegraf
+1. ~~**Remote write pipeline** - Stream aggr config only matches ACUVIM, not victron_* metrics from Telegraf~~ ✅ Fixed
 2. **Cloud ingestion** - Need to verify data is flowing edge → cloud
 3. **API consistency** - Edge and cloud have different event models
 4. **Alerting** - Design notes in `docs/design/ALERTING_DESIGN.md`, nothing implemented
+5. **GX realtime null values** - Some GX fields (pin, pout, mode) are null in `/api/realtime`. Likely MQTT topic mapping issue - `REALTIME_TOPIC_MAP` paths may not match all GX models/instance numbers. Not critical but needs cleanup.
 
 ---
 
@@ -298,8 +299,37 @@ mosquitto_sub -h localhost -t 'ovr/#' -v
 ```
 
 **Topic schema:**
-- `ovr/<node_id>/realtime` - System summary (SOC, voltage, power, mode)
+- `ovr/<node_id>/realtime` - System summaries (see payload format below)
 - `ovr/<node_id>/events` - Event lifecycle (start, end, join) - future
+
+**Realtime payload format** (`ovr/<node_id>/realtime`):
+```json
+{
+  "systems": [
+    {
+      "system_id": "pro6005-2",
+      "type": "gx",
+      "soc": 85.0,
+      "voltage": 52.1,
+      "pin": 1200,
+      "pout": 800,
+      "mode": 3,
+      "ts": 1706745600000,
+      "stale": false
+    },
+    {
+      "system_id": "acuvim_101",
+      "type": "acuvim",
+      "vln": 120.5,
+      "i_avg": 45.2,
+      "p_total": 5400,
+      "ts": 1706745600000,
+      "stale": false
+    }
+  ],
+  "ts": 1706745600000
+}
+```
 
 **Edge bridge config (add to edge mosquitto.conf):**
 ```
@@ -350,6 +380,9 @@ curl -s localhost:8428/api/v1/query?query=up | jq
 ## Files Changed Recently
 
 ```
+2026-01-31: edge/services/events/app.py (ACUVIM realtime worker, type-aware summary)
+2026-01-31: edge/telegraf/templates/acuvim_modbus.tpl (system_id label, removed device/location/node_id/deployment_id)
+2026-01-31: edge/vmagent/entrypoint.sh (removed global system_id label override)
 2026-01-30: docs/design/ALERTING_DESIGN.md (new)
 2026-01-30: ovr-tele_feature_roadmap_v3.md (updated milestone status)
 2026-01-30: cloud/services/api/app.py (event resolution)
