@@ -4,21 +4,73 @@ Essential context for Claude instances working on this repository.
 
 ## What This Is
 
-**ovr-tele** is a distributed telemetry and control system for mobile solar+battery installations (RVs, boats, off-grid).
+**ovr-tele** is the telemetry and control platform for **Overdrive Energy Solutions**, a company providing temporary/portable power solutions that reduce diesel consumption through:
 
-- **Edge nodes** (N100 mini PCs) run on each installation, collecting data from Victron GX devices via MQTT
-- **Cloud backend** (VPS) aggregates fleet data, provides fleet map UI, handles event management
-- Data flows: GX → MQTT → Telegraf → VictoriaMetrics (edge) → remote_write → VictoriaMetrics (cloud)
+- **Direct PV offset** - Solar displacing generator runtime
+- **Hybridization** - Battery + generator working together efficiently
+- **Peak shaving** - Using battery to reduce grid demand charges
+
+### Why Accurate Data Matters
+
+Proper system sizing prevents failures. Undersized battery = dead loads. Oversized = wasted cost. Accurate load profiling from real events informs future deployments and proves value to clients (diesel saved, kWh delivered, carbon offset).
+
+### Use Cases
+
+- **Live events** (primary) - Concerts, festivals, corporate events
+- **Disaster relief** - Emergency power deployments
+- **Construction** - Temporary site power
+- **Time-shifting** - e.g., overnight battery charging for autonomous robots
+
+### Scale
+
+Large events can have **100+ assets** being measured simultaneously - multiple BESS units, generator feeds, stage transformers, PV inverters, etc.
+
+## Architecture
+
+**Edge nodes** (N100 mini PCs) are distributed across a site. Each node monitors multiple systems in its proximity via Ethernet or WiFi. Nodes are added as needed for coverage.
+
+**Cloud backend** (VPS) aggregates data from all edge nodes across all deployments. Provides fleet-wide visibility, event management, and reporting.
+
+```
+Data flow: Assets → Edge Nodes → VictoriaMetrics (local) → remote_write → Cloud VM
+```
+
+## Data Sources
+
+| Source | Protocol | What it measures |
+|--------|----------|------------------|
+| **Victron GX** | MQTT | Overdrive's own BESS units (battery, inverter, solar) |
+| **ACUVIM** | Modbus/HTTP | Large loads - transformers, stage services (up to 400A 3-phase) |
+| **Fronius** | Modbus | Grid-tie PV inverters |
+| **Other BESS** | Modbus | Third-party battery systems when needed |
+
+The goal is a **universal data aggregation system** - not locked to any single vendor.
+
+## Reporting
+
+Reports are generated **automatically and immediately**:
+- Per-system report when that system's participation in an event ends
+- Aggregated event report when the entire event concludes
+- All data retained for deeper analysis and potential ML
+
+### Audiences
+
+| Product | Audience |
+|---------|----------|
+| **Reports** | Operations, clients (billing, sustainability) |
+| **Edge dashboard** | Field techs, operations (real-time monitoring) |
+| **Grafana** | Everyone (different dashboards for different roles) |
 
 ## Key Technologies
 
-- **VictoriaMetrics** - Time series database (Prometheus-compatible)
-- **Telegraf** - Metrics collection (MQTT consumer with Starlark processor)
+- **VictoriaMetrics** - Time series database (Prometheus-compatible, handles high cardinality)
+- **Telegraf** - Metrics collection (MQTT consumer, Modbus, with Starlark processor)
 - **Mosquitto** - MQTT broker (internal to edge stack)
 - **Flask** - Python APIs (edge events service, cloud fleet API)
 - **React + Vite** - Frontends (edge dashboard, cloud fleet map)
 - **Docker Compose** - Container orchestration
 - **Caddy** - TLS termination and auth (cloud)
+- **Grafana** - Dashboards for all audiences
 
 ## Victron/Venus OS MQTT
 

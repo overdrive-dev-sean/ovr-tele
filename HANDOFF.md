@@ -7,6 +7,28 @@
 
 ---
 
+## Business Context
+
+**Overdrive Energy Solutions** provides temporary/portable power for live events, disaster relief, construction, and other applications. The goal: **reduce diesel consumption** through solar offset, battery hybridization, and peak shaving.
+
+**Why this system exists:**
+- Accurate load data is critical for sizing systems (undersized = failures, oversized = wasted cost)
+- Clients need proof of value (kWh delivered, diesel saved, carbon offset)
+- Operations needs real-time visibility across 100+ assets at large events
+- Immediate automated reporting upon event completion
+
+**Data sources:** Victron GX (our BESS), ACUVIM (large loads up to 400A 3-phase), Fronius (PV), other Modbus devices. Goal is vendor-agnostic universal aggregation.
+
+**Audiences:**
+- Field techs → Edge monitoring dashboard
+- Operations → Dashboards + reports
+- Clients → Reports + Grafana
+- Everyone → Grafana (role-specific dashboards)
+
+See `CLAUDE.md` for full technical context.
+
+---
+
 ## System Overview
 
 ```
