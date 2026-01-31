@@ -253,21 +253,35 @@ When working in tandem:
   ```
 
 ### Cloud Claude
-- **Working on:** Integration verified
+- **Working on:** Node/system hierarchy refactor complete ✓
 - **Blocked by:** (nothing)
 - **Notes:**
   - ✅ Remote write confirmed - receiving metrics
   - ✅ MQTT broker running on port 1883
-  - ✅ Firewall opened for port 1883 (was blocking before)
-  - ⏳ No edge MQTT data yet - edge may need to restart mqtt-broker
+  - ✅ MQTT WebSocket working via Caddy at `/mqtt`
+  - ✅ Fleet Map displays realtime data with ⚡ indicator
+  - ✅ API refactored to group by `node_id` with nested `systems` array
+  - ✅ Uses `system_id` label for individual GX/ACUVIM devices
+  - ✅ Node URL built from `node_id` → `https://{node_id}.overdrive.rocks`
+  - ✅ Metric names aligned with Telegraf output (victron_*_value, acuvim_*)
+  - ✅ Removed polling indicator and refresh button from Fleet Map UI
 
-**MQTT Bridge Status:**
-- ✅ Hetzner Cloud Firewall opened for TCP 1883
-- ✅ Edge bridge connected: `node-04.cloud-bridge` from `108.205.10.185`
-- ⏳ No realtime data yet - edge events service may need rebuild:
-  ```bash
-  docker compose -f /opt/ovr/edge/compose.dev.yml up -d --build events
-  ```
+**API Response Format** (`/api/nodes`):
+```json
+{
+  "node_id": "node-04",
+  "node_url": "https://node-04.overdrive.rocks",
+  "soc": 100,
+  "pout": 11,
+  "systems": [
+    {"system_id": "pro6005-2", "type": "gx", "soc": 100, "pout": 11},
+    {"system_id": "acuvim_101", "type": "acuvim", "vavg": 121.5, "p": 905}
+  ]
+}
+```
+
+**Waiting on Edge:**
+- Update `node_id` label from "n100-01" to "node-04"
 
 **Remote Write Details for Edge:**
 ```
@@ -380,6 +394,8 @@ curl -s localhost:8428/api/v1/query?query=up | jq
 ## Files Changed Recently
 
 ```
+2026-01-31: cloud/services/api/app.py (node/system hierarchy refactor, metric name alignment)
+2026-01-31: cloud/services/map/src/App.jsx (display node_id, removed polling UI)
 2026-01-31: edge/services/events/app.py (ACUVIM realtime worker, type-aware summary)
 2026-01-31: edge/telegraf/templates/acuvim_modbus.tpl (system_id label, removed device/location/node_id/deployment_id)
 2026-01-31: edge/vmagent/entrypoint.sh (removed global system_id label override)

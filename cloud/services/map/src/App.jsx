@@ -273,7 +273,7 @@ const buildGroupMarkerSize = (rows) => {
 const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventLabel) => {
   const status = getGroupStatus(groupNodes);
   const labelSource = group.primary || group.mapNode || groupNodes[0];
-  const label = escapeHtml(labelSource?.system_id || group.key);
+  const label = escapeHtml(labelSource?.node_id || labelSource?.system_id || group.key);
   const alertCount = groupNodes.reduce(
     (total, node) => total + (node.alerts_count || 0),
     0
@@ -292,7 +292,7 @@ const buildGroupMarkerHtml = (group, groupNodes, eventGroup, eventLabel) => {
       const pout = formatPower(node.pout);
       return `
         <div class="marker-group-row">
-          <span class="marker-group-id">${escapeHtml(node.system_id)}</span>
+          <span class="marker-group-id">${escapeHtml(node.node_id || node.system_id)}</span>
           <span class="marker-group-metric">SOC ${soc}</span>
           <span class="marker-group-metric">P<sub>out</sub> ${pout}</span>
         </div>
@@ -338,7 +338,7 @@ const buildSpiderfyPositions = (center, count) => {
 
 const buildMarkerHtml = (node, eventLoggers, eventLabel) => {
   const status = getStatusClass(node);
-  const label = escapeHtml(node.system_id);
+  const label = escapeHtml(node.node_id || node.system_id);
   const isLogger = Boolean(node.is_logger);
   const hasAcuvim = isLogger && node.acuvim_updated_at !== null && node.acuvim_updated_at !== undefined;
   const leftMetric = isLogger
@@ -388,7 +388,7 @@ const buildPopupHtml = (node, eventDetails, eventLabel) => {
     : '';
   return `
     <div class="popup">
-      <div class="popup-title">${escapeHtml(node.system_id)}</div>
+      <div class="popup-title">${escapeHtml(node.node_id || node.system_id)}</div>
       <div class="popup-row"><strong>Location:</strong> ${location}</div>
       <div class="popup-row"><strong>Event:</strong> ${eventId}</div>
       ${
@@ -1725,20 +1725,13 @@ export default function App() {
             <div className="eyebrow">Overdrive Telemetry</div>
             <h1>Fleet Map</h1>
             <div className="meta">
-              Last update: {lastUpdated ? lastUpdated.toLocaleTimeString() : '--'}
-            </div>
-            <div className="meta">Polling: {pollSeconds}s</div>
-            <div className="meta">
-              Realtime: {mqttConnected ? (
-                <span style={{ color: '#4ade80' }}>● Connected</span>
+              {mqttConnected ? (
+                <span style={{ color: '#4ade80' }}>● Live</span>
               ) : (
                 <span style={{ color: '#f87171' }}>○ Disconnected</span>
               )}
             </div>
           </div>
-          <button className="btn" onClick={fetchNodes}>
-            Refresh now
-          </button>
         </div>
 
         {statusMessage ? <div className="status-banner">{statusMessage}</div> : null}
@@ -1986,7 +1979,7 @@ export default function App() {
                             onChange={() => toggleNodeSelection(node.node_id)}
                           />
                           <span>
-                            {node.system_id} · {node.node_id}
+                            {node.node_id || node.system_id}
                             {alreadyInEvent ? ' (already in event)' : ''}
                           </span>
                         </label>
@@ -2077,7 +2070,7 @@ export default function App() {
                       {isExpanded ? '-' : '+'}
                     </button>
                     <div className="node-head-main">
-                      <div className="node-title">{node.system_id}</div>
+                      <div className="node-title">{node.node_id || node.system_id}</div>
                       {node.node_url ? (
                         <a
                           className="link node-open-link"
@@ -2226,7 +2219,7 @@ export default function App() {
                       {isExpanded ? '-' : '+'}
                     </button>
                     <div className="node-head-main">
-                      <div className="node-title">{node.system_id}</div>
+                      <div className="node-title">{node.node_id || node.system_id}</div>
                       {node.node_url ? (
                         <a
                           className="link node-open-link"
@@ -2464,7 +2457,7 @@ export default function App() {
         {placementTarget ? (
           <div className="placement-hint">
             <div>
-              Click the map to place <strong>{placementTarget.system_id}</strong>.
+              Click the map to place <strong>{placementTarget.node_id || placementTarget.system_id}</strong>.
             </div>
             <button className="btn ghost" onClick={() => setPlacementTarget(null)}>
               Cancel

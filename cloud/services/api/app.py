@@ -1200,8 +1200,8 @@ def _default_deployment_ids() -> List[str]:
 
 _REPORT_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _MONTHLY_METRICS = {
-    "soc": "victron_battery_soc",
-    "pout": "victron_ac_out_power",
+    "soc": "victron_battery_soc_value",
+    "pout": "victron_vebus_ac_out_p_value",
 }
 
 
@@ -2123,6 +2123,89 @@ def _base_node(system_id: str) -> Dict[str, Any]:
     }
 
 
+def _base_node_grouped(node_id: str) -> Dict[str, Any]:
+    """Base structure for a node with grouped systems."""
+    return {
+        "node_id": node_id,
+        "deployment_id": None,
+        "latitude": None,
+        "longitude": None,
+        "event_id": None,
+        "event_updated_at": None,
+        "gps_updated_at": None,
+        "gps_age_sec": None,
+        "gps_source": "none",
+        "location": None,
+        "node_url": None,
+        "manual": None,
+        "alerts": [],
+        "alerts_count": 0,
+        "systems": [],
+        # Aggregated metrics from primary GX (for backward compat)
+        "soc": None,
+        "pout": None,
+        # Aggregated ACUVIM metrics (for backward compat)
+        "acuvim_vavg": None,
+        "acuvim_iavg": None,
+        "acuvim_p": None,
+        "acuvim_updated_at": None,
+    }
+
+
+def _base_gx_system(portal_id: str) -> Dict[str, Any]:
+    """Base structure for a GX system."""
+    return {
+        "system_id": portal_id,
+        "type": "gx",
+        "gx_host": None,
+        "soc": None,
+        "pout": None,
+        "latitude": None,
+        "longitude": None,
+        "gps_updated_at": None,
+        "alerts": [],
+        "alerts_count": 0,
+    }
+
+
+def _base_acuvim_system(device: str) -> Dict[str, Any]:
+    """Base structure for an ACUVIM system."""
+    return {
+        "system_id": device,
+        "type": "acuvim",
+        "location": None,
+        "ip": None,
+        "vavg": None,
+        "iavg": None,
+        "p": None,
+        "updated_at": None,
+    }
+
+
+def _get_gx_system_id(metric: Dict[str, Any]) -> Optional[str]:
+    """Extract unique system ID for a GX device from system_id label."""
+    system_id = metric.get("system_id")
+    if system_id and system_id not in ("-", ""):
+        return system_id
+    # Fallback to portal_id for legacy data
+    portal_id = metric.get("portal_id")
+    if portal_id and portal_id not in ("-", ""):
+        return portal_id
+    return None
+
+
+def _get_acuvim_system_id(metric: Dict[str, Any]) -> Optional[str]:
+    """Extract unique system ID for an ACUVIM device from system_id label."""
+    system_id = metric.get("system_id")
+    if system_id and system_id not in ("-", ""):
+        return system_id
+    # Fallback to device for legacy data
+    device = metric.get("device")
+    if device and device not in ("-", ""):
+        return device
+    return None
+
+
 def _apply_series(nodes: Dict[str, Dict[str, Any]], series_list: List[Dict[str, Any]], field: str) -> None:
     for series in series_list:
         metric = series.get("metric", {})
@@ -2330,7 +2413,7 @@ def _load_nodes(
     )
 
     alarm_selector = _build_selector(
-        ["__name__=~\"victron_alarm_.*\""],
+        ["__name__=~\"victron_.*_alarms_.*_value\""],
         deployment_ids=deployment_ids,
     )
     alarms_series = _vm_query_vector(
@@ -2463,6 +2546,301 @@ def _nodes_by_node_id(nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         if current.get("is_logger") and not node.get("is_logger"):
             result[node_id] = node
     return result
+
+
+def _load_nodes_grouped(
+    deployment_ids: Optional[List[str]] = None,
+    event_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Load nodes grouped by node_id with systems nested within."""
+    selector = _build_selector(deployment_ids=deployment_ids)
+    lookback = f"{LOOKBACK_SECONDS}s"
+
+    # Query all node_ids
+    node_ids = _vm_label_values("node_id", selector if selector else None)
+
+    nodes: Dict[str, Dict[str, Any]] = {}
+    for node_id in node_ids:
+        normalized = _clean_label_value(node_id, PLACEHOLDER_NODE_IDS)
+        if not normalized or normalized in nodes:
+            continue
+        nodes[normalized] = _base_node_grouped(normalized)
+
+    # Query GX metrics
+    gx_lat_series = _vm_query_vector(
+        f"last_over_time({_metric_name('victron_gps_position_latitude_value')}{selector}[{lookback}])"
+    )
+    gx_lon_series = _vm_query_vector(
+        f"last_over_time({_metric_name('victron_gps_position_longitude_value')}{selector}[{lookback}])"
+    )
+    gx_soc_series = _vm_query_vector(
+        f"last_over_time({_metric_name('victron_battery_soc_value')}{selector}[{lookback}])"
+    )
+    gx_pout_series = _vm_query_vector(
+        f"last_over_time({_metric_name('victron_vebus_ac_out_p_value')}{selector}[{lookback}])"
+    )
+
+    alarm_selector = _build_selector(
+        ["__name__=~\"victron_.*_alarms_.*_value\""],
+        deployment_ids=deployment_ids,
+    )
+    gx_alarms_series = _vm_query_vector(
+        f"last_over_time({alarm_selector}[{lookback}])"
+    )
+
+    # Query ACUVIM metrics
+    acuvim_vavg_series = _vm_query_vector(
+        f"last_over_time({_metric_name('acuvim_Vln')}{selector}[{lookback}])"
+    )
+    acuvim_iavg_series = _vm_query_vector(
+        f"last_over_time({_metric_name('acuvim_I')}{selector}[{lookback}])"
+    )
+    acuvim_p_series = _vm_query_vector(
+        f"last_over_time({_metric_name('acuvim_P')}{selector}[{lookback}])"
+    )
+
+    # Query events
+    event_labels = _build_event_labels(event_ids)
+    event_selector = _build_selector(event_labels, deployment_ids=deployment_ids)
+    event_series: List[Dict[str, Any]] = []
+    for metric in _event_metric_names():
+        event_series.extend(
+            _vm_query_vector(
+                f"last_over_time({metric}{event_selector}[{lookback}])"
+            )
+        )
+
+    # Build systems lookup: node_id -> {system_id -> system}
+    gx_systems: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    acuvim_systems: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    def _apply_gx_data(series_list: List[Dict[str, Any]], field: str) -> None:
+        for series in series_list:
+            metric = series.get("metric", {})
+            node_id = _clean_label_value(metric.get("node_id"), PLACEHOLDER_NODE_IDS)
+            if not node_id or node_id not in nodes:
+                continue
+            system_id = _get_gx_system_id(metric)
+            if not system_id:
+                continue
+
+            # Get or create system entry
+            if node_id not in gx_systems:
+                gx_systems[node_id] = {}
+            if system_id not in gx_systems[node_id]:
+                gx_systems[node_id][system_id] = _base_gx_system(system_id)
+
+            system = gx_systems[node_id][system_id]
+            system["gx_host"] = metric.get("gx_host")
+
+            value = _value_to_float(series.get("value"))
+            if value is not None:
+                system[field] = value
+                if field in ("latitude", "longitude"):
+                    ts = _value_ts(series.get("value"))
+                    if ts:
+                        system["gps_updated_at"] = max(system.get("gps_updated_at") or 0, ts)
+
+            # Also set deployment_id on node
+            deployment_id = _clean_label_value(metric.get("deployment_id"), PLACEHOLDER_DEPLOYMENT_IDS)
+            if deployment_id:
+                nodes[node_id]["deployment_id"] = deployment_id
+
+    def _apply_gx_alarms(series_list: List[Dict[str, Any]]) -> None:
+        for series in series_list:
+            metric = series.get("metric", {})
+            node_id = _clean_label_value(metric.get("node_id"), PLACEHOLDER_NODE_IDS)
+            if not node_id or node_id not in nodes:
+                continue
+            system_id = _get_gx_system_id(metric)
+            if not system_id:
+                continue
+
+            value = _value_to_float(series.get("value"))
+            if value is None or value < 0.5:
+                continue
+
+            if node_id not in gx_systems:
+                gx_systems[node_id] = {}
+            if system_id not in gx_systems[node_id]:
+                gx_systems[node_id][system_id] = _base_gx_system(system_id)
+
+            system = gx_systems[node_id][system_id]
+            name = metric.get("name") or metric.get("__name__", "alarm")
+            if name.endswith(":avg"):
+                name = name[:-4]
+            system["alerts"].append(name)
+
+    def _apply_acuvim_data(series_list: List[Dict[str, Any]], field: str) -> None:
+        for series in series_list:
+            metric = series.get("metric", {})
+            node_id = _clean_label_value(metric.get("node_id"), PLACEHOLDER_NODE_IDS)
+            if not node_id or node_id not in nodes:
+                continue
+            system_id = _get_acuvim_system_id(metric)
+            if not system_id:
+                continue
+
+            if node_id not in acuvim_systems:
+                acuvim_systems[node_id] = {}
+            if system_id not in acuvim_systems[node_id]:
+                acuvim_systems[node_id][system_id] = _base_acuvim_system(system_id)
+
+            system = acuvim_systems[node_id][system_id]
+            system["ip"] = metric.get("ip")
+            location = metric.get("location")
+            if location and location != "-":
+                system["location"] = location
+
+            value = _value_to_float(series.get("value"))
+            if value is not None:
+                system[field] = value
+                ts = _value_ts(series.get("value"))
+                if ts:
+                    system["updated_at"] = max(system.get("updated_at") or 0, ts)
+
+            deployment_id = _clean_label_value(metric.get("deployment_id"), PLACEHOLDER_DEPLOYMENT_IDS)
+            if deployment_id:
+                nodes[node_id]["deployment_id"] = deployment_id
+
+    # Apply GX data
+    _apply_gx_data(gx_lat_series, "latitude")
+    _apply_gx_data(gx_lon_series, "longitude")
+    _apply_gx_data(gx_soc_series, "soc")
+    _apply_gx_data(gx_pout_series, "pout")
+    _apply_gx_alarms(gx_alarms_series)
+
+    # Apply ACUVIM data
+    _apply_acuvim_data(acuvim_vavg_series, "vavg")
+    _apply_acuvim_data(acuvim_iavg_series, "iavg")
+    _apply_acuvim_data(acuvim_p_series, "p")
+
+    # Apply events to nodes
+    for series in event_series:
+        metric = series.get("metric", {})
+        node_id = _clean_label_value(metric.get("node_id"), PLACEHOLDER_NODE_IDS)
+        if not node_id or node_id not in nodes:
+            continue
+        event_id = _normalize_label_value(metric.get("event_id"))
+        value = _value_to_float(series.get("value"))
+        if value is None or value < 0.5:
+            continue
+        ts = _value_ts(series.get("value")) or 0
+        node = nodes[node_id]
+        prev_ts = node.get("event_updated_at") or 0
+        if ts >= prev_ts:
+            node["event_id"] = event_id
+            node["event_updated_at"] = ts
+            location = _normalize_label_value(metric.get("location"))
+            if location and location != "-":
+                node["location"] = location
+
+    # Finalize nodes: attach systems, aggregate data, build URLs
+    now = time.time()
+    manual_locations = _load_manual_locations()
+
+    for node_id, node in nodes.items():
+        # Attach GX systems
+        if node_id in gx_systems:
+            for system in gx_systems[node_id].values():
+                system["alerts"] = sorted(set(system["alerts"]))
+                system["alerts_count"] = len(system["alerts"])
+                node["systems"].append(system)
+                # Aggregate to node level (first GX with data wins)
+                if node["latitude"] is None and system.get("latitude") is not None:
+                    node["latitude"] = system["latitude"]
+                    node["longitude"] = system["longitude"]
+                    node["gps_updated_at"] = system.get("gps_updated_at")
+                if node["soc"] is None and system.get("soc") is not None:
+                    node["soc"] = system["soc"]
+                if node["pout"] is None and system.get("pout") is not None:
+                    node["pout"] = system["pout"]
+                # Aggregate alerts
+                node["alerts"].extend(system["alerts"])
+
+        # Attach ACUVIM systems
+        if node_id in acuvim_systems:
+            for system in acuvim_systems[node_id].values():
+                node["systems"].append(system)
+                # Aggregate to node level
+                if node["acuvim_vavg"] is None and system.get("vavg") is not None:
+                    node["acuvim_vavg"] = system["vavg"]
+                    node["acuvim_iavg"] = system.get("iavg")
+                    node["acuvim_p"] = system.get("p")
+                    node["acuvim_updated_at"] = system.get("updated_at")
+
+        # Finalize alerts
+        node["alerts"] = sorted(set(node["alerts"]))
+        node["alerts_count"] = len(node["alerts"])
+
+        # GPS age
+        gps_ts = node.get("gps_updated_at")
+        if gps_ts:
+            node["gps_age_sec"] = max(0, int(now - gps_ts))
+            node["gps_source"] = "gps"
+
+        # Manual location fallback
+        manual = manual_locations.get(node_id)
+        node["manual"] = manual
+        gps_valid = node.get("latitude") is not None and node.get("longitude") is not None
+        gps_stale = node.get("gps_age_sec") is not None and node["gps_age_sec"] > GPS_STALE_SECONDS
+        if (not gps_valid or gps_stale) and manual:
+            node["latitude"] = manual["latitude"]
+            node["longitude"] = manual["longitude"]
+            node["gps_source"] = "manual"
+            node["gps_age_sec"] = max(0, int(now - manual["updated_at"]))
+
+        # Build node URL using node_id directly
+        node["node_url"] = _build_node_url_simple(node_id, node.get("deployment_id"))
+
+    # Filter by event if specified
+    if event_ids:
+        nodes = {
+            nid: n for nid, n in nodes.items()
+            if n.get("event_id") in event_ids
+        }
+
+    # Filter out nodes with no data
+    result = []
+    for node in nodes.values():
+        if (
+            node.get("systems")
+            or node.get("latitude") is not None
+            or node.get("soc") is not None
+            or node.get("event_id")
+        ):
+            result.append(node)
+
+    return sorted(result, key=lambda n: n.get("node_id") or "")
+
+
+def _build_node_url_simple(node_id: str, deployment_id: Optional[str]) -> Optional[str]:
+    """Build node URL using node_id directly."""
+    node_id = _clean_label_value(node_id, PLACEHOLDER_NODE_IDS)
+    if not node_id:
+        return None
+
+    if NODE_URL_TEMPLATE:
+        context = {
+            "node_id": node_id,
+            "deployment_id": deployment_id or "",
+        }
+        try:
+            url = NODE_URL_TEMPLATE.format(**context)
+        except Exception:
+            return None
+        if not url or "{" in url or "}" in url:
+            return None
+        return url
+
+    node_domain = NODE_DOMAIN
+    if not node_domain and BASE_DOMAIN:
+        node_domain = f"{NODE_SUBDOMAIN}.{BASE_DOMAIN}" if NODE_SUBDOMAIN else BASE_DOMAIN
+
+    if not node_domain:
+        return None
+
+    return f"https://{node_id}.{node_domain}"
 
 
 def _load_active_events(deployment_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
@@ -2768,6 +3146,25 @@ def api_deployments() -> Any:
 
 @app.route("/api/nodes", methods=["GET"])
 def api_nodes() -> Any:
+    deployment_ids = _parse_deployment_filter()
+    event_ids = _parse_event_filter()
+    # Use grouped format (node_id as primary, systems nested)
+    nodes = _load_nodes_grouped(
+        deployment_ids if deployment_ids else None,
+        event_ids if event_ids else None,
+    )
+    resp = jsonify({
+        "generated_at": int(time.time()),
+        "nodes": nodes,
+    })
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/nodes/legacy", methods=["GET"])
+def api_nodes_legacy() -> Any:
+    """Legacy endpoint using old system_id-based format."""
     deployment_ids = _parse_deployment_filter()
     event_ids = _parse_event_filter()
     nodes = _load_nodes(
