@@ -228,6 +228,7 @@ export default function App() {
   });
   const [dashboardSystems, setDashboardSystems] = useState([]);
   const [discoveredServices, setDiscoveredServices] = useState([]);
+  const [cloudEventRegistry, setCloudEventRegistry] = useState([]);
   const [activeEventId, setActiveEventId] = useState('');
   const [activeLoggers, setActiveLoggers] = useState([]);
   const [eventIdInput, setEventIdInput] = useState('');
@@ -506,6 +507,17 @@ export default function App() {
       } catch (fallbackErr) {
         console.warn('Fallback dashboard also failed:', fallbackErr);
       }
+    }
+  };
+
+  const loadCloudEventRegistry = async () => {
+    try {
+      const data = await getJson('/events/registry');
+      const events = data.events || [];
+      setCloudEventRegistry(events);
+    } catch (err) {
+      // Silent fail - registry is optional, might not be connected to cloud
+      console.debug('Cloud event registry not available:', err);
     }
   };
 
@@ -1005,16 +1017,20 @@ export default function App() {
     loadDashboard();
     loadGps(false);
     loadActiveLocations();
+    loadCloudEventRegistry();
 
     const fastTimer = setInterval(loadSummary, 1000);
     const slowTimer = setInterval(loadSummary, 10000);
     // Realtime endpoint is MQTT-cached, so we can poll faster (1s vs 2s)
     const dashboardTimer = setInterval(loadDashboard, 1000);
+    // Cloud registry doesn't change often, poll every 30s
+    const registryTimer = setInterval(loadCloudEventRegistry, 30000);
 
     return () => {
       clearInterval(fastTimer);
       clearInterval(slowTimer);
       clearInterval(dashboardTimer);
+      clearInterval(registryTimer);
       stopGxSettingPoll();
     };
   }, []);
@@ -1636,10 +1652,18 @@ export default function App() {
                 <input
                   type="text"
                   id="eventId"
-                  placeholder="e.g., warehouse, customer_site_a"
+                  list="eventIdOptions"
+                  placeholder="Select or enter event name"
                   value={eventIdInput}
                   onChange={(e) => setEventIdInput(e.target.value)}
                 />
+                <datalist id="eventIdOptions">
+                  {cloudEventRegistry.map((event) => (
+                    <option key={event.event_id} value={event.event_id}>
+                      {event.status === 'active' ? '● ' : ''}{event.event_id}
+                    </option>
+                  ))}
+                </datalist>
               </div>
             )}
 

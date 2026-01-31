@@ -121,7 +121,7 @@ MAPBOX_FREE_TILES_PER_MONTH = int(os.environ.get("MAPBOX_FREE_TILES_PER_MONTH", 
 ESRI_FREE_TILES_PER_MONTH = int(os.environ.get("ESRI_FREE_TILES_PER_MONTH", "2000000"))
 GUARDRAIL_LIMIT_PCT = float(os.environ.get("GUARDRAIL_LIMIT_PCT", "0.95"))
 
-# Cloud fleet API (optional)
+# Cloud fleet API (optional - used for tile usage sync, may be deprecated)
 CLOUD_API_URL = os.environ.get("CLOUD_API_URL", os.environ.get("CLOUD_BASE_URL", "")).strip()
 CLOUD_API_TIMEOUT = float(os.environ.get("CLOUD_API_TIMEOUT", "4"))
 TILE_USAGE_SYNC_INTERVAL = int(os.environ.get("TILE_USAGE_SYNC_INTERVAL", "60"))
@@ -1514,7 +1514,56 @@ def _report_upload_backoff_seconds(attempts: int) -> int:
     return min(REPORT_UPLOAD_BACKOFF_MAX, REPORT_UPLOAD_BACKOFF_BASE * (2**exponent))
 
 
+# MQTT client for report publishing (reused across calls)
+_report_mqtt_client = None
+_report_mqtt_lock = threading.Lock()
+
+
+def _publish_report_mqtt(payload: Dict[str, Any]) -> bool:
+    """Publish report to cloud via MQTT bridge."""
+    global _report_mqtt_client
+
+    if not PAHO_AVAILABLE:
+        return False
+
+    node_id = NODE_ID or SYSTEM_ID or "unknown"
+    topic = f"ovr/{node_id}/reports"
+
+    try:
+        with _report_mqtt_lock:
+            if _report_mqtt_client is None:
+                _report_mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                _report_mqtt_client.connect(LOCAL_MQTT_BROKER, LOCAL_MQTT_PORT, keepalive=60)
+                _report_mqtt_client.loop_start()
+
+            result = _report_mqtt_client.publish(topic, json.dumps(payload), qos=1)
+            if result.rc == 0:
+                logger.info(f"Report published via MQTT: {topic}")
+                return True
+            else:
+                logger.warning(f"MQTT publish failed: rc={result.rc}")
+                return False
+    except Exception as exc:
+        logger.warning(f"Report MQTT publish failed: {exc}")
+        # Reset client on error
+        with _report_mqtt_lock:
+            if _report_mqtt_client:
+                try:
+                    _report_mqtt_client.loop_stop()
+                    _report_mqtt_client.disconnect()
+                except:
+                    pass
+                _report_mqtt_client = None
+        return False
+
+
 def _post_report_payload(payload: Dict[str, Any]) -> bool:
+    """Upload report - tries MQTT first, falls back to HTTP if configured."""
+    # Try MQTT first (preferred - goes through bridge)
+    if _publish_report_mqtt(payload):
+        return True
+
+    # Fall back to HTTP if MQTT fails and HTTP is configured
     if not REPORT_UPLOAD_URL or not REPORT_UPLOAD_TOKEN:
         return False
     headers = {"X-Report-Token": REPORT_UPLOAD_TOKEN}
@@ -1526,11 +1575,11 @@ def _post_report_payload(payload: Dict[str, Any]) -> bool:
             timeout=REPORT_UPLOAD_TIMEOUT,
         )
     except Exception as exc:
-        logger.warning(f"Report upload failed: {exc}")
+        logger.warning(f"Report HTTP upload failed: {exc}")
         return False
     if resp.status_code not in (200, 201):
         logger.warning(
-            "Report upload failed: %s %s", resp.status_code, resp.text[:200]
+            "Report HTTP upload failed: %s %s", resp.status_code, resp.text[:200]
         )
         return False
     return True
@@ -1610,8 +1659,7 @@ def report_upload_worker() -> None:
 
 
 def _upload_report_json(report: Dict[str, Any], report_html: Optional[str] = None) -> None:
-    if not REPORT_UPLOAD_URL or not REPORT_UPLOAD_TOKEN:
-        return
+    """Upload report via MQTT (primary) or HTTP (fallback)."""
     event_id = report.get("event_id")
     temp_event_id = report.get("temp_event_id") or (
         event_id if _is_temp_event_id(event_id or "") else ""
@@ -2290,60 +2338,13 @@ def _cloud_url(path: str) -> Optional[str]:
     return f"{CLOUD_API_URL.rstrip('/')}{path}"
 
 
-def _create_cloud_event(event_id: str) -> bool:
-    """Create event in cloud registry if it doesn't exist.
-
-    Returns True if event was created or already exists, False on error.
-    """
-    if not event_id or _is_temp_event_id(event_id):
-        return False
-    url = _cloud_url("/api/events")
-    if not url:
-        return False
-    try:
-        resp = requests.post(
-            url,
-            json={"event_name": event_id},
-            timeout=CLOUD_API_TIMEOUT,
-        )
-        # 201 = created, 409 = already exists (both are fine)
-        if resp.status_code in (200, 201, 409):
-            logger.info(f"Cloud event sync: {event_id} (status={resp.status_code})")
-            return True
-        else:
-            logger.warning(f"Cloud event create failed: {resp.status_code} {resp.text[:200]}")
-            return False
-    except Exception as exc:
-        logger.warning(f"Cloud event create failed: {exc}")
-        return False
+def _cloud_headers() -> Dict[str, str]:
+    """Build headers for cloud API requests."""
+    return {"Content-Type": "application/json"}
 
 
-def _post_cloud_event_node(event_id: str, node_id: str) -> None:
-    if not event_id or _is_temp_event_id(event_id):
-        return
-    url = _cloud_url(f"/api/events/{quote(event_id, safe='')}/nodes")
-    if not url:
-        return
-    try:
-        requests.post(
-            url,
-            json={"node_id": node_id},
-            timeout=CLOUD_API_TIMEOUT,
-        )
-    except Exception as exc:
-        logger.warning(f"Cloud event node add failed: {exc}")
-
-
-def _post_cloud_event_node_end(event_id: str, node_id: str) -> None:
-    if not event_id or _is_temp_event_id(event_id):
-        return
-    url = _cloud_url(f"/api/events/{quote(event_id, safe='')}/nodes/{quote(node_id, safe='')}/end")
-    if not url:
-        return
-    try:
-        requests.post(url, timeout=CLOUD_API_TIMEOUT)
-    except Exception as exc:
-        logger.warning(f"Cloud event node end failed: {exc}")
+# Event sync now happens via MQTT (event_id in realtime payload)
+# Cloud subscribes to ovr/+/realtime and auto-creates events
 
 
 def _fetch_cloud_status() -> Optional[Dict[str, Any]]:
@@ -2354,7 +2355,7 @@ def _fetch_cloud_status() -> Optional[Dict[str, Any]]:
     if DEPLOYMENT_ID:
         params["deployment_id"] = DEPLOYMENT_ID
     try:
-        resp = requests.get(url, params=params, timeout=CLOUD_API_TIMEOUT)
+        resp = requests.get(url, params=params, headers=_cloud_headers(), timeout=CLOUD_API_TIMEOUT)
     except Exception as exc:
         logger.warning(f"Cloud status fetch failed: {exc}")
         return None
@@ -2376,7 +2377,7 @@ def _post_cloud_preferred(provider: str) -> Optional[Dict[str, Any]]:
     if DEPLOYMENT_ID:
         payload["deployment_id"] = DEPLOYMENT_ID
     try:
-        resp = requests.post(url, json=payload, timeout=CLOUD_API_TIMEOUT)
+        resp = requests.post(url, json=payload, headers=_cloud_headers(), timeout=CLOUD_API_TIMEOUT)
     except Exception as exc:
         logger.warning(f"Cloud preferred update failed: {exc}")
         return None
@@ -2402,7 +2403,7 @@ def _post_cloud_tile_usage(provider: str, delta: int, month_key: str) -> bool:
     if DEPLOYMENT_ID:
         payload["deployment_id"] = DEPLOYMENT_ID
     try:
-        resp = requests.post(url, json=payload, timeout=CLOUD_API_TIMEOUT)
+        resp = requests.post(url, json=payload, headers=_cloud_headers(), timeout=CLOUD_API_TIMEOUT)
     except Exception as exc:
         logger.warning(f"Cloud tile usage update failed: {exc}")
         return False
@@ -2707,12 +2708,30 @@ def get_realtime_summary() -> Dict[str, Any]:
 LOCAL_MQTT_BROKER = os.environ.get("LOCAL_MQTT_BROKER", "localhost")
 LOCAL_MQTT_PORT = int(os.environ.get("LOCAL_MQTT_PORT", "1883"))
 
+# Cloud event registry cache (populated via MQTT from cloud)
+_cloud_registry_cache: Dict[str, Any] = {"events": [], "ts": 0}
+_cloud_registry_lock = threading.Lock()
+
+
+def _get_active_event_ids() -> List[str]:
+    """Get distinct event_ids from active_events table."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT event_id FROM active_events WHERE event_id IS NOT NULL"
+            ).fetchall()
+            return [r["event_id"] for r in rows]
+    except Exception:
+        return []
+
 
 def _mqtt_local_publish_worker() -> None:
     """Background worker that publishes realtime summary to local MQTT broker.
 
     This data gets bridged to cloud for fleet map realtime updates.
     Topic: ovr/<node_id>/realtime
+
+    Payload includes event_id so cloud can auto-create events from MQTT.
     """
     if not PAHO_AVAILABLE:
         logger.warning("paho-mqtt not available, local MQTT publish disabled")
@@ -2735,6 +2754,13 @@ def _mqtt_local_publish_worker() -> None:
             # Get current realtime summary and publish
             summary = get_realtime_summary()
             if summary.get("systems"):
+                # Include active event_id(s) so cloud can auto-create events
+                event_ids = _get_active_event_ids()
+                if event_ids:
+                    # Use first event_id (typically only one active per node)
+                    summary["event_id"] = event_ids[0]
+                    if len(event_ids) > 1:
+                        summary["event_ids"] = event_ids
                 payload = json.dumps(summary)
                 client.publish(topic, payload, qos=1, retain=True)
                 logger.debug(f"Published realtime to {topic}: {len(summary['systems'])} systems")
@@ -2759,6 +2785,77 @@ def _mqtt_local_publish_worker() -> None:
             client.disconnect()
         except:
             pass
+
+
+# ============================================================================
+# Cloud Registry Subscriber (receive event list from cloud via MQTT)
+# ============================================================================
+
+def _on_registry_message(client, userdata, msg) -> None:
+    """Handle incoming registry messages from cloud."""
+    try:
+        payload = json.loads(msg.payload.decode("utf-8"))
+        topic = msg.topic
+
+        if topic == "ovr/registry/events":
+            with _cloud_registry_lock:
+                _cloud_registry_cache["events"] = payload.get("events", [])
+                _cloud_registry_cache["ts"] = payload.get("ts", int(time.time() * 1000))
+            logger.info(f"Received cloud registry: {len(_cloud_registry_cache['events'])} events")
+    except Exception as e:
+        logger.warning(f"Failed to parse registry message: {e}")
+
+
+def _mqtt_registry_subscriber_worker() -> None:
+    """Background worker that subscribes to cloud registry updates via MQTT.
+
+    Cloud publishes event list to ovr/registry/events, bridged to local broker.
+    This populates the event dropdown on edge nodes.
+    """
+    if not PAHO_AVAILABLE:
+        logger.warning("paho-mqtt not available, registry subscriber disabled")
+        return
+
+    client = None
+    while not _heartbeat_stop.is_set():
+        try:
+            if client is None:
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+                client.on_message = _on_registry_message
+                client.connect(LOCAL_MQTT_BROKER, LOCAL_MQTT_PORT, keepalive=60)
+                client.subscribe("ovr/registry/#", qos=1)
+                client.loop_start()
+                logger.info("Registry subscriber connected, waiting for cloud events")
+
+            _heartbeat_stop.wait(30)
+
+        except Exception as e:
+            logger.warning(f"Registry subscriber error: {e}")
+            if client:
+                try:
+                    client.loop_stop()
+                    client.disconnect()
+                except:
+                    pass
+                client = None
+            _heartbeat_stop.wait(10)
+
+    if client:
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except:
+            pass
+
+
+def get_cloud_event_registry() -> Dict[str, Any]:
+    """Get the cached cloud event registry."""
+    with _cloud_registry_lock:
+        return {
+            "events": list(_cloud_registry_cache["events"]),
+            "ts": _cloud_registry_cache["ts"],
+            "source": "cloud_mqtt"
+        }
 
 
 # ============================================================================
@@ -2844,6 +2941,21 @@ def api_realtime():
 
     summary = get_realtime_summary()
     resp = jsonify(summary)
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+@app.route("/api/events/registry", methods=["GET"])
+def api_events_registry():
+    """Get cloud event registry (received via MQTT from cloud).
+
+    Returns list of all events known to the fleet, for populating dropdowns.
+    """
+    if not check_api_key():
+        return jsonify({"error": "Invalid API key"}), 401
+
+    registry = get_cloud_event_registry()
+    resp = jsonify(registry)
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     return resp
 
@@ -3138,11 +3250,7 @@ def api_event_start():
             conn.commit()
         
         log_audit("event_start", system_id, event_id, location, note, True)
-        node_key = NODE_ID or SYSTEM_ID
-        if node_key:
-            # Create event in cloud registry (idempotent - ok if already exists)
-            _create_cloud_event(event_id)
-            _post_cloud_event_node(event_id, node_key)
+        # Event sync to cloud happens via MQTT (event_id included in realtime payload)
         return jsonify({
             "success": True,
             "system_id": system_id,
@@ -7070,6 +7178,11 @@ if PAHO_AVAILABLE:
     mqtt_local_publish_thread = threading.Thread(target=_mqtt_local_publish_worker, daemon=True, name="mqtt-local-publish")
     mqtt_local_publish_thread.start()
     logger.info("Local MQTT publisher started (topic: ovr/<node_id>/realtime)")
+
+    # Start registry subscriber thread (receives event list from cloud)
+    mqtt_registry_thread = threading.Thread(target=_mqtt_registry_subscriber_worker, daemon=True, name="mqtt-registry")
+    mqtt_registry_thread.start()
+    logger.info("Cloud registry subscriber started (topic: ovr/registry/#)")
 else:
     logger.warning("paho-mqtt not installed, realtime MQTT updates disabled")
 

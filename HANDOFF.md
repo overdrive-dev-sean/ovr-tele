@@ -204,7 +204,7 @@ See `CLAUDE.md` for full technical context.
 ### Known Issues / Needs Work
 
 1. ~~**Remote write pipeline** - Stream aggr config only matches ACUVIM, not victron_* metrics from Telegraf~~ ✅ Fixed
-2. **Cloud ingestion** - Need to verify data is flowing edge → cloud
+2. ~~**Cloud ingestion** - Need to verify data is flowing edge → cloud~~ ✅ Verified working
 3. **API consistency** - Edge and cloud have different event models
 4. **Alerting** - Design notes in `docs/design/ALERTING_DESIGN.md`, nothing implemented
 5. **GX realtime null values** - Some GX fields (pin, pout, mode) are null in `/api/realtime`. Likely MQTT topic mapping issue - `REALTIME_TOPIC_MAP` paths may not match all GX models/instance numbers. Not critical but needs cleanup.
@@ -213,6 +213,7 @@ See `CLAUDE.md` for full technical context.
    - Known (from `gx_systems.json`, `targets_acuvim.txt`) - even if offline
    - Manual IP entry - with subnet hints showing what networks the node can reach
    This helps with pre-staging and troubleshooting connectivity.
+7. ~~**Edge→Cloud event sync**~~ ✅ Now uses bidirectional MQTT (no HTTP/CF Access needed)
 
 ---
 
@@ -241,17 +242,22 @@ When working in tandem:
 *Update this section as you work*
 
 ### Edge Claude
-- **Working on:** All edge→cloud integration complete ✓
+- **Working on:** Bidirectional MQTT sync complete ✓
 - **Blocked by:** (nothing)
 - **Notes:**
   - ✅ Victron federation working (1609 samples/scrape)
   - ✅ Stream aggregation producing :10s_avg metrics
   - ✅ Cloud remote write working
-  - ✅ MQTT bridge CONNECTED to cloud
+  - ✅ MQTT bridge CONNECTED to cloud (bidirectional)
   - ✅ Realtime data flowing (`ovr/node-04/realtime`)
-  - ✅ Fixed NODE_ID: now `node-04` (was `n100-01`)
-  - ✅ Removed SYSTEM_ID from edge.env (no longer used)
-  - ✅ Removed SYSTEM_ID from bootstrap templates
+  - ✅ `event_id` included in realtime MQTT payload (cloud auto-creates events)
+  - ✅ Registry subscriber receives `ovr/registry/events` from cloud
+  - ✅ Frontend event dropdown populated from cloud registry
+  - ✅ Removed HTTP-based event sync (CF Access complexity)
+
+  **Bidirectional MQTT sync:**
+  - **Edge → Cloud:** `ovr/<node_id>/realtime` (systems + event_id)
+  - **Cloud → Edge:** `ovr/registry/events` (event list for dropdowns)
 
   Bridge logs confirm:
   ```
@@ -324,12 +330,14 @@ mosquitto_sub -h localhost -t 'ovr/#' -v
 ```
 
 **Topic schema:**
-- `ovr/<node_id>/realtime` - System summaries (see payload format below)
-- `ovr/<node_id>/events` - Event lifecycle (start, end, join) - future
+- `ovr/<node_id>/realtime` - System summaries + event_id (see payload format below)
+- `ovr/<node_id>/reports` - Report uploads (JSON with HTML)
+- `ovr/registry/events` - Event list from cloud (for dropdowns)
 
 **Realtime payload format** (`ovr/<node_id>/realtime`):
 ```json
 {
+  "event_id": "Coachella2026",
   "systems": [
     {
       "system_id": "pro6005-2",
@@ -356,13 +364,38 @@ mosquitto_sub -h localhost -t 'ovr/#' -v
 }
 ```
 
-**Edge bridge config (add to edge mosquitto.conf):**
+**Reports payload format** (`ovr/<node_id>/reports`):
+```json
+{
+  "report_type": "event",
+  "event_id": "Coachella2026",
+  "generated_at": "2026-01-31T12:00:00Z",
+  "node_id": "node-04",
+  "deployment_id": "OverdriveFleet",
+  "report": { ... },
+  "report_html": "<html>...</html>"
+}
+```
+
+**Registry payload format** (`ovr/registry/events` - cloud publishes):
+```json
+{
+  "events": [
+    {"event_id": "Coachella2026", "status": "active"},
+    {"event_id": "SXSW2026", "status": "ended"}
+  ],
+  "ts": 1706745600000
+}
+```
+
+**Edge bridge config:**
 ```
 connection cloud-bridge
 address 5.78.73.219:1883
 remote_username ovr-bridge
 remote_password devpassword123
 topic ovr/# out 1
+topic ovr/registry/# in 1
 bridge_protocol_version mqttv311
 ```
 
@@ -372,6 +405,16 @@ bridge_protocol_version mqttv311
 - ✅ Merges realtime data with node display (SOC, voltage, power)
 - ✅ Shows connection status indicator
 - ✅ Shows ⚡ icon on nodes with live MQTT data
+
+**Cloud TODO: MQTT subscriptions**
+Cloud API should subscribe to internal MQTT broker and handle:
+1. `ovr/+/realtime` → auto-create events when `event_id` present
+2. `ovr/+/reports` → save reports to database
+3. Publish `ovr/registry/events` when event list changes
+
+Implementation options:
+- Add MQTT subscriber to Flask API (background thread)
+- Or create separate worker that syncs MQTT → events table
 
 ---
 
@@ -405,9 +448,14 @@ curl -s localhost:8428/api/v1/query?query=up | jq
 ## Files Changed Recently
 
 ```
+2026-01-31: edge/services/events/app.py (CF Access service token support for cloud API)
+2026-01-31: edge/services/events/.env.example (CF_ACCESS_CLIENT_ID/SECRET vars)
 2026-01-31: cloud/services/api/app.py (node/system hierarchy refactor, metric name alignment)
 2026-01-31: cloud/services/map/src/App.jsx (display node_id, removed polling UI)
 2026-01-31: edge/services/events/app.py (ACUVIM realtime worker, type-aware summary)
+2026-01-31: edge/services/events/app.py (bidirectional MQTT sync, registry subscriber, removed CF Access)
+2026-01-31: edge/services/frontend/src/App.jsx (cloud registry dropdown for events)
+2026-01-31: edge/mosquitto/mosquitto.conf (bidirectional bridge - out + in topics)
 2026-01-31: edge/telegraf/templates/acuvim_modbus.tpl (system_id label, removed device/location/node_id/deployment_id)
 2026-01-31: edge/vmagent/entrypoint.sh (removed global system_id label override)
 2026-01-30: docs/design/ALERTING_DESIGN.md (new)
